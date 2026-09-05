@@ -1,0 +1,133 @@
+groups:
+  - name: xray-e2e-prober.alerts
+    interval: 30s
+    rules:
+      - alert: SyntheticCheckUnreachableFromInstance
+        expr: synthetic:check:fresh_failure == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Synthetic check fails from one observation instance"
+          description: "Check {{ $labels.check_id }} has a fresh confirmed failure on {{ $labels.instance_id }}."
+
+      # Change `>= 2`, `for`, and severity to match the monitoring policy.
+      # The inner max ensures scrape replicas are not counted as observation
+      # instances. A third successful instance does not cancel two failures.
+      - alert: SyntheticCheckUnavailableFromMultipleInstances
+        expr: |
+          count by (check_id, mode, target_set_id) (
+            max by (check_id, instance_id, mode, target_set_id) (
+              synthetic:check:fresh_failure == 1
+            )
+          ) >= 2
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Synthetic check fails from multiple observation instances"
+          description: "Check {{ $labels.check_id }} fails from at least two distinct instance_id values."
+
+      # These metrics come from an independently managed inventory, not from
+      # the prober being observed. See inventory.example.yaml.
+      - alert: SyntheticCheckCoverageIncomplete
+        expr: |
+          (
+            synthetic_expected_check_info
+            unless on (check_id, instance_id)
+            synthetic_check_info
+          )
+          or
+          (
+            synthetic_expected_source_info
+            unless on (instance_id, source_id)
+            synthetic_prober_source_refresh_success
+          )
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Expected synthetic monitoring coverage is incomplete"
+          description: "An expected check or source is absent for instance {{ $labels.instance_id }}."
+
+      - alert: SyntheticCheckStale
+        expr: |
+          (
+            (
+              (synthetic_check_state{state="stale"} == 1)
+              or on (check_id, instance_id)
+              (
+                (synthetic_check_last_run_timestamp_seconds > 0)
+                and on (check_id, instance_id)
+                ((time() - synthetic_check_last_run_timestamp_seconds) > 600)
+              )
+              or on (check_id, instance_id)
+              (
+                (synthetic_check_last_run_timestamp_seconds == 0)
+                and on (check_id, instance_id)
+                (
+                  (time() - synthetic_expected_check_since_timestamp_seconds) > 600
+                )
+              )
+            )
+            unless on (check_id, instance_id)
+            (
+              synthetic_check_state{state="disabled"} == 1
+            )
+          )
+          * on (check_id, instance_id) group_left (source_id, mode, target_set_id)
+          (synthetic_check_info == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Synthetic check result is stale"
+          description: "Check {{ $labels.check_id }} on {{ $labels.instance_id }} has no fresh completed run."
+
+      - alert: SyntheticCheckExecutionError
+        expr: synthetic_check_state{state="error"} == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Synthetic check executor reports an error"
+          description: "Check {{ $labels.check_id }} on {{ $labels.instance_id }} cannot produce a network result."
+
+      - alert: SyntheticProberDown
+        expr: |
+          synthetic_expected_instance_info
+          unless on (instance_id)
+          (
+            max by (instance_id) (up{job="xray-e2e-prober"}) == 1
+          )
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Expected Xray E2E Prober instance is down"
+          description: "No healthy scrape target exists for expected instance {{ $labels.instance_id }}."
+
+      - alert: SyntheticSourceRefreshFailed
+        expr: |
+          (synthetic_prober_source_refresh_success == 0)
+          and on (instance_id, source_id)
+          (
+            (synthetic_prober_source_last_success_timestamp_seconds == 0)
+            or
+            ((time() - synthetic_prober_source_last_success_timestamp_seconds) > 1800)
+          )
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Subscription source has not refreshed successfully"
+          description: "Source {{ $labels.source_id }} on {{ $labels.instance_id }} has a prolonged refresh failure."
+
+      - alert: SyntheticEgressMismatch
+        expr: synthetic:egress:fresh_mismatch == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fresh egress assertion mismatch"
+          description: "Assertion {{ $labels.assertion_id }} for check {{ $labels.check_id }} observed an IP outside configured CIDRs."

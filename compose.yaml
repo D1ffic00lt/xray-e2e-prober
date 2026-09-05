@@ -1,0 +1,81 @@
+name: xray-e2e-prober
+
+services:
+  prober:
+    # A fixed local tag keeps the example usable from source. In production set
+    # PROBER_IMAGE to a released tag plus digest; see docs/operations.md.
+    image: ${PROBER_IMAGE:-xray-e2e-prober:0.1.0}
+    pull_policy: missing
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.13.12-slim-bookworm@sha256:a58daefb915e1e03ad48f3ca4df8832065412c5c35cacb9d39f4229184de12b6}
+        UV_VERSION: ${UV_VERSION:-0.12.5}
+        XRAY_VERSION: ${XRAY_VERSION:-26.3.27}
+        XRAY_SHA256_AMD64: ${XRAY_SHA256_AMD64:-23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae}
+        XRAY_SHA256_ARM64: ${XRAY_SHA256_ARM64:-4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c}
+    command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      PROBER_CONFIG: /data/config.yaml
+      PROBER_DATA_DIR: /data
+      PROBER_RUNTIME_DIR: /tmp/xray-e2e-prober
+      XRAY_BINARY: /usr/local/bin/xray
+      XRAY_LOCATION_ASSET: /usr/local/share/xray
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1770,uid=10001,gid=10001
+    volumes:
+      - prober-data:/data
+    secrets:
+      - source: subscription-url
+        target: subscription-url
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: subscription-authorization
+        target: subscription-authorization
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+    ports:
+      - "127.0.0.1:${PROBER_PORT:-8080}:8080"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    pids_limit: 128
+    mem_limit: 512m
+    mem_reservation: 128m
+    cpus: 1.0
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/live', timeout=2).read()"
+      interval: 30s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  prober-data:
+
+secrets:
+  subscription-url:
+    file: ${PROBER_SUBSCRIPTION_URL_FILE:-./examples/secrets/subscription-url.example}
+  subscription-authorization:
+    file: ${PROBER_SUBSCRIPTION_AUTHORIZATION_FILE:-./examples/secrets/subscription-authorization.example}

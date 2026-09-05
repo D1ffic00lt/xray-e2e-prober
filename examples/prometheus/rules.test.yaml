@@ -1,0 +1,209 @@
+rule_files:
+  - recording_rules.yaml
+  - alerting_rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: one fresh failure alerts on one instance
+    interval: 1m
+    input_series:
+      - series: 'synthetic_check_state{check_id="check-a",instance_id="edge-a",state="failure"}'
+        values: '1x15'
+      - series: 'synthetic_check_last_run_timestamp_seconds{check_id="check-a",instance_id="edge-a"}'
+        values: '540x15'
+      - series: 'synthetic_check_info{check_id="check-a",instance_id="edge-a",source_id="source-a",mode="connection",target_set_id="web"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: SyntheticCheckUnreachableFromInstance
+        exp_alerts:
+          - exp_labels:
+              check_id: check-a
+              instance_id: edge-a
+              mode: connection
+              severity: warning
+              source_id: source-a
+              state: failure
+              target_set_id: web
+            exp_annotations:
+              summary: Synthetic check fails from one observation instance
+              description: Check check-a has a fresh confirmed failure on edge-a.
+
+  - name: two failures alert even when a third instance succeeds
+    interval: 1m
+    input_series:
+      - series: 'synthetic_check_state{check_id="check-a",instance_id="edge-a",state="failure"}'
+        values: '1x15'
+      - series: 'synthetic_check_state{check_id="check-a",instance_id="edge-b",state="failure"}'
+        values: '1x15'
+      - series: 'synthetic_check_state{check_id="check-a",instance_id="edge-c",state="success"}'
+        values: '1x15'
+      - series: 'synthetic_check_last_run_timestamp_seconds{check_id="check-a",instance_id="edge-a"}'
+        values: '600x15'
+      - series: 'synthetic_check_last_run_timestamp_seconds{check_id="check-a",instance_id="edge-b"}'
+        values: '600x15'
+      - series: 'synthetic_check_last_run_timestamp_seconds{check_id="check-a",instance_id="edge-c"}'
+        values: '600x15'
+      - series: 'synthetic_check_info{check_id="check-a",instance_id="edge-a",source_id="source-a",mode="connection",target_set_id="web"}'
+        values: '1x15'
+      - series: 'synthetic_check_info{check_id="check-a",instance_id="edge-b",source_id="source-a",mode="connection",target_set_id="web"}'
+        values: '1x15'
+      - series: 'synthetic_check_info{check_id="check-a",instance_id="edge-c",source_id="source-a",mode="connection",target_set_id="web"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: SyntheticCheckUnavailableFromMultipleInstances
+        exp_alerts:
+          - exp_labels:
+              check_id: check-a
+              mode: connection
+              severity: critical
+              target_set_id: web
+            exp_annotations:
+              summary: Synthetic check fails from multiple observation instances
+              description: Check check-a fails from at least two distinct instance_id values.
+
+  - name: inventory detects missing check and missing instance
+    interval: 1m
+    input_series:
+      - series: 'synthetic_expected_check_info{check_id="missing-check",instance_id="edge-a",source_id="source-a",mode="profile",target_set_id="private"}'
+        values: '1x15'
+      - series: 'synthetic_expected_instance_info{instance_id="edge-a",site="eu-1"}'
+        values: '1x15'
+      - series: 'synthetic_expected_source_info{instance_id="edge-a",source_id="missing-source"}'
+        values: '1x15'
+      - series: 'up{job="xray-e2e-prober",instance="127.0.0.1:8080",instance_id="edge-a"}'
+        values: '0x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: SyntheticCheckCoverageIncomplete
+        exp_alerts:
+          - exp_labels:
+              check_id: missing-check
+              instance_id: edge-a
+              mode: profile
+              severity: warning
+              source_id: source-a
+              target_set_id: private
+            exp_annotations:
+              summary: Expected synthetic monitoring coverage is incomplete
+              description: An expected check or source is absent for instance edge-a.
+          - exp_labels:
+              instance_id: edge-a
+              severity: warning
+              source_id: missing-source
+            exp_annotations:
+              summary: Expected synthetic monitoring coverage is incomplete
+              description: An expected check or source is absent for instance edge-a.
+      - eval_time: 12m
+        alertname: SyntheticProberDown
+        exp_alerts:
+          - exp_labels:
+              instance_id: edge-a
+              severity: critical
+              site: eu-1
+            exp_annotations:
+              summary: Expected Xray E2E Prober instance is down
+              description: No healthy scrape target exists for expected instance edge-a.
+
+  - name: stale before first run execution error refresh failure and egress mismatch differ
+    interval: 1m
+    input_series:
+      - series: 'synthetic_check_state{check_id="never-run",instance_id="edge-a",state="unknown"}'
+        values: '1x60'
+      - series: 'synthetic_check_last_run_timestamp_seconds{check_id="never-run",instance_id="edge-a"}'
+        values: '0x60'
+      - series: 'synthetic_expected_check_since_timestamp_seconds{check_id="never-run",instance_id="edge-a"}'
+        values: '60x60'
+      - series: 'synthetic_check_info{check_id="never-run",instance_id="edge-a",source_id="source-a",mode="profile",target_set_id="web"}'
+        values: '1x60'
+      - series: 'synthetic_check_state{check_id="old-run",instance_id="edge-a",state="stale"}'
+        values: '1x60'
+      - series: 'synthetic_check_last_run_timestamp_seconds{check_id="old-run",instance_id="edge-a"}'
+        values: '300x60'
+      - series: 'synthetic_check_info{check_id="old-run",instance_id="edge-a",source_id="source-a",mode="connection",target_set_id="web"}'
+        values: '1x60'
+      # A disabled check can have a zero/old timestamp indefinitely without
+      # representing stale monitoring coverage.
+      - series: 'synthetic_check_state{check_id="disabled-check",instance_id="edge-a",state="disabled"}'
+        values: '1x60'
+      - series: 'synthetic_check_last_run_timestamp_seconds{check_id="disabled-check",instance_id="edge-a"}'
+        values: '0x60'
+      - series: 'synthetic_expected_check_since_timestamp_seconds{check_id="disabled-check",instance_id="edge-a"}'
+        values: '60x60'
+      - series: 'synthetic_check_info{check_id="disabled-check",instance_id="edge-a",source_id="source-a",mode="connection",target_set_id="web"}'
+        values: '1x60'
+      - series: 'synthetic_check_state{check_id="executor-error",instance_id="edge-a",state="error"}'
+        values: '1x60'
+      - series: 'synthetic_prober_source_refresh_success{instance_id="edge-a",source_id="source-a"}'
+        values: '0x60'
+      - series: 'synthetic_prober_source_last_success_timestamp_seconds{instance_id="edge-a",source_id="source-a"}'
+        values: '100x60'
+      - series: 'synthetic_check_egress_state{check_id="egress-check",instance_id="edge-a",assertion_id="office-cidr",state="mismatch"}'
+        values: '1x60'
+      - series: 'synthetic_check_last_run_timestamp_seconds{check_id="egress-check",instance_id="edge-a"}'
+        values: '2700x60'
+      - series: 'synthetic_check_info{check_id="egress-check",instance_id="edge-a",source_id="source-a",mode="connection",target_set_id="web"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: SyntheticCheckStale
+        exp_alerts:
+          - exp_labels:
+              check_id: never-run
+              instance_id: edge-a
+              mode: profile
+              severity: warning
+              source_id: source-a
+              target_set_id: web
+            exp_annotations:
+              summary: Synthetic check result is stale
+              description: Check never-run on edge-a has no fresh completed run.
+          - exp_labels:
+              check_id: old-run
+              instance_id: edge-a
+              mode: connection
+              severity: warning
+              source_id: source-a
+              state: stale
+              target_set_id: web
+            exp_annotations:
+              summary: Synthetic check result is stale
+              description: Check old-run on edge-a has no fresh completed run.
+      - eval_time: 20m
+        alertname: SyntheticCheckExecutionError
+        exp_alerts:
+          - exp_labels:
+              check_id: executor-error
+              instance_id: edge-a
+              severity: warning
+              state: error
+            exp_annotations:
+              summary: Synthetic check executor reports an error
+              description: Check executor-error on edge-a cannot produce a network result.
+      - eval_time: 50m
+        alertname: SyntheticSourceRefreshFailed
+        exp_alerts:
+          - exp_labels:
+              instance_id: edge-a
+              severity: warning
+              source_id: source-a
+            exp_annotations:
+              summary: Subscription source has not refreshed successfully
+              description: Source source-a on edge-a has a prolonged refresh failure.
+      - eval_time: 50m
+        alertname: SyntheticEgressMismatch
+        exp_alerts:
+          - exp_labels:
+              assertion_id: office-cidr
+              check_id: egress-check
+              instance_id: edge-a
+              mode: connection
+              severity: warning
+              source_id: source-a
+              state: mismatch
+              target_set_id: web
+            exp_annotations:
+              summary: Fresh egress assertion mismatch
+              description: Assertion office-cidr for check egress-check observed an IP outside configured CIDRs.

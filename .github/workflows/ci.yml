@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.6.0
+        with:
+          python-version-file: .python-version
+
+      - name: Install pinned uv
+        run: python -m pip install --disable-pip-version-check uv==0.12.5
+
+      - name: Verify lock file and install dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Smoke test CLI entry point
+        run: uv run --locked prober --help
+
+      - name: Run Python tests
+        run: uv run --locked pytest
+
+  prometheus-rules:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate and test Prometheus rules
+        env:
+          PROMETHEUS_IMAGE: prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+        run: |
+          docker run --rm --entrypoint /bin/promtool \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --workdir /workspace \
+            "${PROMETHEUS_IMAGE}" \
+            check rules \
+            examples/prometheus/recording_rules.yaml \
+            examples/prometheus/alerting_rules.yaml \
+            examples/prometheus/inventory.example.yaml
+          docker run --rm --entrypoint /bin/promtool \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --workdir /workspace \
+            "${PROMETHEUS_IMAGE}" \
+            test rules examples/prometheus/rules.test.yaml
+
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate Compose model
+        run: docker compose config --quiet
+
+      - name: Build pinned runtime image
+        run: docker build --tag xray-e2e-prober:ci .
+
+      - name: Build real-Xray integration image
+        run: docker build --target integration-test --tag xray-e2e-prober:integration .
+
+      - name: Run local-only real-Xray integration matrix
+        run: >-
+          docker run --rm
+          --network none
+          --add-host xray-integration.invalid:127.0.0.1
+          --env XRAY_TEST_SERVER_HOST=xray-integration.invalid
+          xray-e2e-prober:integration
+
+      - name: Verify image identity and non-root user
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' xray-e2e-prober:ci)" = "10001:10001"
+          docker run --rm --entrypoint python xray-e2e-prober:ci --version | grep -F 'Python 3.13.12'
+          docker run --rm --entrypoint /usr/local/bin/xray xray-e2e-prober:ci version | grep -F 'Xray 26.3.27'
+
+      - name: Run hardened Compose lifecycle smoke
+        env:
+          PROBER_IMAGE: xray-e2e-prober:ci
+          PROBER_PORT: "18080"
+        run: |
+          docker compose down --volumes --remove-orphans
+          docker volume create xray-e2e-prober_prober-data
+          docker run --rm --user 0:0 \
+            --volume xray-e2e-prober_prober-data:/data \
+            --entrypoint /bin/sh xray-e2e-prober:ci -ec \
+            "printf '%s\n' 'schema_version: 1' 'instance_id: ci-compose-smoke' 'sources: []' 'target_sets: []' > /data/config.yaml; chown 10001:10001 /data/config.yaml; chmod 0600 /data/config.yaml"
+          cleanup() {
+            docker compose down --volumes --remove-orphans
+          }
+          trap cleanup EXIT
+          docker compose up --detach --no-build prober
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/health/ready; then
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              docker compose logs prober
+              exit 1
+            fi
+            sleep 1
+          done
+          container_id=$(docker compose ps --quiet prober)
+          test -n "$container_id"
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container_id")" = "true"
+          test "$(docker inspect --format '{{json .HostConfig.CapDrop}}' "$container_id")" = '["ALL"]'
+          test "$(docker inspect --format '{{.HostConfig.PidsLimit}}' "$container_id")" = "128"
+          test "$(docker inspect --format '{{.HostConfig.Memory}}' "$container_id")" = "536870912"
+          test "$(docker inspect --format '{{.HostConfig.NanoCpus}}' "$container_id")" = "1000000000"
+          docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container_id" | grep -F 'no-new-privileges'
+          docker compose stop --timeout 30 prober
+          test -z "$(docker compose ps --quiet --status running prober)"
+
+  container-arm64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build Linux arm64 real-Xray integration image
+        run: >-
+          docker buildx build
+          --platform linux/arm64
+          --target integration-test
+          --load
+          --tag xray-e2e-prober:integration-arm64
+          .
+
+      - name: Run local-only arm64 real-Xray integration matrix
+        run: >-
+          docker run --rm
+          --network none
+          --add-host xray-integration.invalid:127.0.0.1
+          --env XRAY_TEST_SERVER_HOST=xray-integration.invalid
+          xray-e2e-prober:integration-arm64
+
+      - name: Build Linux arm64 runtime image without publishing
+        run: >-
+          docker buildx build
+          --platform linux/arm64
+          --output type=oci,dest=/tmp/xray-e2e-prober-arm64.tar
+          .

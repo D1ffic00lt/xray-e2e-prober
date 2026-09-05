@@ -1,0 +1,150 @@
+# Non-interactive example for schema v1. Copy it to /data/config.yaml and
+# replace IDs, paths, targets, and CIDRs for your environment.
+schema_version: 1
+instance_id: edge-eu-1
+
+# Used only when neither an individual nor a saved/source rule assigns sets.
+default_target_set_ids:
+  - internet-quorum
+
+sources:
+  # Scenario 1: a VLESS subscription. The URL and Authorization value are read
+  # from secret files; neither secret needs to appear in this YAML.
+  - source_id: primary-vless
+    name: Primary VLESS subscription
+    kind: http
+    location_ref:
+      file: /run/secrets/subscription-url
+    format: auto
+    refresh_interval: 300
+    timeout: 20
+    max_bytes: 4194304
+    allow_empty: false
+    allow_insecure_http: false
+    headers_ref:
+      Authorization:
+        file: /run/secrets/subscription-authorization
+    target_set_ids:
+      - internet-quorum
+    # Source defaults apply unless an entry/saved assignment overrides them.
+    egress_assertion_ids:
+      - office-egress
+    enabled: true
+    # Source tags are merged with entry tags for assignment filtering only.
+    tags:
+      - production
+
+  # Scenario 2: a JSON array of complete Xray client profiles. Put the file in
+  # the persistent data volume, for example through `docker compose cp`.
+  - source_id: profiles-json
+    name: Complete client profiles
+    kind: file
+    location: /data/import/profiles.json
+    format: xray_json_array
+    refresh_interval: 300
+    timeout: 20
+    max_bytes: 8388608
+    allow_empty: false
+    target_set_ids:
+      - internet-quorum
+    egress_assertion_ids: []
+    enabled: false
+    tags:
+      - imported-profile
+
+target_sets:
+  - target_set_id: internet-quorum
+    name: Editable public reachability example
+    quorum: 2
+    enabled: true
+    targets:
+      - target_id: example-com
+        name: Example Domain
+        url: https://example.com/
+        method: GET
+        expected_statuses: [200]
+        timeout: 10
+        body:
+          kind: regex
+          value: "Example Domain"
+        max_body_bytes: 65536
+        follow_redirects: false
+        max_redirects: 0
+        enabled: true
+      - target_id: gstatic-204
+        name: Google connectivity response
+        url: https://www.gstatic.com/generate_204
+        method: GET
+        expected_statuses: [204]
+        timeout: 10
+        max_body_bytes: 1024
+        follow_redirects: false
+        max_redirects: 0
+        enabled: true
+      - target_id: cloudflare-trace
+        name: Cloudflare trace
+        url: https://www.cloudflare.com/cdn-cgi/trace
+        method: GET
+        expected_statuses: [200]
+        timeout: 10
+        max_body_bytes: 65536
+        follow_redirects: false
+        max_redirects: 0
+        enabled: true
+
+# This assertion is intentionally disabled: documentation/example CIDRs must
+# never be interpreted as a real routing expectation.
+egress_assertions:
+  - assertion_id: office-egress
+    name: Replace with the expected office egress ranges
+    url: https://api.ipify.org
+    expected_cidrs:
+      - 192.0.2.0/24
+      - 2001:db8::/32
+    response_format: plain
+    timeout: 10
+    enabled: false
+
+# Explicit entry decisions win, then the first matching saved rule, then the
+# source defaults, then default_target_set_ids.
+assignments:
+  - assignment_id: exclude-retired-names
+    filter:
+      # Safe subset: flat alternatives/classes/anchors and optional (?i).
+      # Use name_glob for wildcard repetition; regex quantifiers are rejected.
+      name_regex: "(?i)(retired|disabled)"
+    enabled: false
+    target_set_ids: []
+
+  - assignment_id: xhttp-egress-example
+    source_id: primary-vless
+    filter:
+      protocol: vless
+      transport: xhttp
+    enabled: true
+    mode: connection
+    target_set_ids:
+      - internet-quorum
+    egress_assertion_ids:
+      - office-egress
+
+scheduler:
+  interval: 60
+  request_timeout: 15
+  runtime_start_timeout: 10
+  # Exponential cooldown for start failures/unexpected persistent exits.
+  runtime_restart_backoff_initial: 1
+  runtime_restart_backoff_max: 60
+  # Fixed alive-only delay for profiles with observatory/burstObservatory.
+  observatory_warmup_delay: 5
+  observatory_warmup_timeout: 30
+  max_active_runtimes: 8
+  max_parallel_requests: 32
+  max_queue_size: 1024
+  max_result_age: 180
+
+api:
+  # Safe default for a native process. compose.yaml overrides the bind address
+  # inside the container and publishes it on 127.0.0.1 of the host only.
+  host: 127.0.0.1
+  port: 8080

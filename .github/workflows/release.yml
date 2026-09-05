@@ -1,0 +1,240 @@
+name: Release container
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example, v1.2.3 or v1.2.3-rc.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-container-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish pinned multi-arch image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      REGISTRY: ghcr.io
+
+    steps:
+      - name: Resolve and validate release tag
+        id: release
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${REQUESTED_TAG}" =~ ${semver} ]]; then
+            echo "::error title=Invalid release tag::Expected vMAJOR.MINOR.PATCH with an optional SemVer prerelease suffix and no build metadata."
+            exit 1
+          fi
+
+          if [[ "${REQUESTED_TAG}" == *-* ]]; then
+            prerelease=${REQUESTED_TAG#*-}
+            IFS='.' read -r -a identifiers <<< "${prerelease}"
+            for identifier in "${identifiers[@]}"; do
+              if [[ "${identifier}" =~ ^[0-9]+$ && ${#identifier} -gt 1 && "${identifier}" == 0* ]]; then
+                echo "::error title=Invalid release tag::Numeric prerelease identifiers cannot contain leading zeroes."
+                exit 1
+              fi
+            done
+          fi
+
+          version=${REQUESTED_TAG#v}
+          image="${REGISTRY}/${REPOSITORY,,}"
+          if (( ${#version} > 128 )); then
+            echo "::error title=Invalid release tag::The corresponding OCI tag exceeds 128 characters."
+            exit 1
+          fi
+
+          {
+            printf 'git_tag=%s\n' "${REQUESTED_TAG}"
+            printf 'version=%s\n' "${version}"
+            printf 'image=%s\n' "${image}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Check out the exact release tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: refs/tags/${{ steps.release.outputs.git_tag }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify tag and commit identity
+        id: identity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          GIT_TAG: ${{ steps.release.outputs.git_tag }}
+        run: |
+          set -euo pipefail
+          commit_sha=$(git rev-parse HEAD)
+          tag_sha=$(git rev-parse "${GIT_TAG}^{commit}")
+          if [[ "${commit_sha}" != "${tag_sha}" ]]; then
+            echo "::error title=Tag checkout mismatch::Checked-out commit does not match ${GIT_TAG}."
+            exit 1
+          fi
+          if [[ "${EVENT_NAME}" == "push" && "${commit_sha}" != "${EVENT_SHA}" ]]; then
+            echo "::error title=Moved release tag::The release tag no longer points to the commit from the push event."
+            exit 1
+          fi
+
+          {
+            printf 'commit_sha=%s\n' "${commit_sha}"
+            printf 'commit_tag=sha-%s\n' "${commit_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Verify package version matches release tag
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          project_version=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])')
+          if [[ "${project_version}" != "${RELEASE_VERSION}" ]]; then
+            echo "::error title=Package version mismatch::pyproject.toml declares ${project_version}, but the release tag declares ${RELEASE_VERSION}."
+            exit 1
+          fi
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          driver-opts: |
+            image=docker.io/moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+
+      - name: Refuse to replace published tags
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          VERSION: ${{ steps.release.outputs.version }}
+          COMMIT_TAG: ${{ steps.identity.outputs.commit_tag }}
+        run: |
+          set -euo pipefail
+          check_absent() {
+            local reference=$1
+            local inspection
+            if inspection=$(docker buildx imagetools inspect "${reference}" 2>&1); then
+              echo "::error title=Immutable tag already exists::${reference} is already published; this workflow will not replace it."
+              return 1
+            fi
+            if [[ ! "${inspection}" =~ ([Nn]ot[[:space:]][Ff]ound|manifest[[:space:]]unknown|name[[:space:]]unknown) ]]; then
+              echo "::error title=Registry preflight failed::Could not prove that ${reference} is absent."
+              printf '%s\n' "${inspection}"
+              return 1
+            fi
+          }
+
+          check_absent "${IMAGE}:${VERSION}"
+          check_absent "${IMAGE}:${COMMIT_TAG}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        with:
+          image: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+
+      - name: Build and publish Linux amd64 and arm64
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true
+          tags: |
+            ${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}
+            ${{ steps.release.outputs.image }}:${{ steps.identity.outputs.commit_tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.identity.outputs.commit_sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+          build-args: |
+            APP_VERSION=${{ steps.release.outputs.version }}
+          provenance: mode=max
+          sbom: generator=docker.io/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9
+
+      - name: Verify published digest and write release record
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          VERSION: ${{ steps.release.outputs.version }}
+          GIT_TAG: ${{ steps.release.outputs.git_tag }}
+          COMMIT_SHA: ${{ steps.identity.outputs.commit_sha }}
+          COMMIT_TAG: ${{ steps.identity.outputs.commit_tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=Invalid build digest::Buildx did not return a SHA-256 manifest digest."
+            exit 1
+          fi
+
+          verify_reference() {
+            local reference=$1
+            local manifest_file="${RUNNER_TEMP}/published-manifest.json"
+            local actual_digest
+            docker buildx imagetools inspect --raw "${reference}" > "${manifest_file}"
+            actual_digest="sha256:$(sha256sum "${manifest_file}" | cut -d ' ' -f 1)"
+            if [[ "${actual_digest}" != "${DIGEST}" ]]; then
+              echo "::error title=Published digest mismatch::${reference} resolved to ${actual_digest}, expected ${DIGEST}."
+              exit 1
+            fi
+          }
+
+          verify_reference "${IMAGE}:${VERSION}"
+          verify_reference "${IMAGE}:${COMMIT_TAG}"
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" > image-inspect.txt
+
+          {
+            printf 'image=%s\n' "${IMAGE}"
+            printf 'git_tag=%s\n' "${GIT_TAG}"
+            printf 'version_tag=%s\n' "${VERSION}"
+            printf 'commit=%s\n' "${COMMIT_SHA}"
+            printf 'commit_tag=%s\n' "${COMMIT_TAG}"
+            printf 'digest=%s\n' "${DIGEST}"
+            printf 'immutable_ref=%s@%s\n' "${IMAGE}" "${DIGEST}"
+            printf 'attestations=buildkit-provenance-max,buildkit-sbom\n'
+          } > release-image.txt
+
+          {
+            printf '## Published container image\n\n'
+            printf '| Field | Value |\n'
+            printf '| --- | --- |\n'
+            printf "| Git tag | \`%s\` |\n" "${GIT_TAG}"
+            printf "| Version tag | \`%s:%s\` |\n" "${IMAGE}" "${VERSION}"
+            printf "| Commit tag | \`%s:%s\` |\n" "${IMAGE}" "${COMMIT_TAG}"
+            printf "| Immutable reference | \`%s@%s\` |\n" "${IMAGE}" "${DIGEST}"
+            printf "| Platforms | \`linux/amd64\`, \`linux/arm64\` |\n"
+            printf "| Attestations | BuildKit provenance (\`mode=max\`) and SBOM |\n"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload release digest record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-${{ steps.release.outputs.version }}-${{ steps.identity.outputs.commit_tag }}
+          path: |
+            release-image.txt
+            image-inspect.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90

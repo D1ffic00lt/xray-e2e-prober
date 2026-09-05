@@ -1,0 +1,38 @@
+# Python bytecode and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Build output
+build/
+dist/
+*.egg-info/
+
+# Local editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Runtime state and credentials. uv.lock is intentionally committed.
+/data/
+/.env
+/.env.*
+!/.env.example
+/config.local.yaml
+/secrets/
+/examples/secrets/*
+!/examples/secrets/README.md
+!/examples/secrets/*.example
+
+# Local reports
+*.log
+reports/

@@ -1,0 +1,35 @@
+# Load this rule file into Prometheus only after replacing labels from
+# `prober config export --json` → `expected_inventory`. Include checks whose
+# exported `enabled` value is true. Inventory must live independently of probers.
+groups:
+  - name: xray-e2e-prober.expected-inventory
+    interval: 1m
+    rules:
+      - record: synthetic_expected_instance_info
+        expr: vector(1)
+        labels:
+          instance_id: edge-eu-1
+          site: eu-1
+
+      - record: synthetic_expected_source_info
+        expr: vector(1)
+        labels:
+          instance_id: edge-eu-1
+          source_id: primary-vless
+
+      - record: synthetic_expected_check_info
+        expr: vector(1)
+        labels:
+          check_id: check_example_replace_from_export
+          instance_id: edge-eu-1
+          source_id: primary-vless
+          mode: connection
+          target_set_id: internet-quorum
+
+      # Unix time at which this check became expected. Do not use time() here:
+      # that would reset the age on every evaluation and hide a missing run.
+      - record: synthetic_expected_check_since_timestamp_seconds
+        expr: vector(1788566400)
+        labels:
+          check_id: check_example_replace_from_export
+          instance_id: edge-eu-1

@@ -1,0 +1,87 @@
+groups:
+  - name: xray-e2e-prober.recording
+    interval: 30s
+    rules:
+      # 10 minutes is the example freshness window. Keep it aligned with the
+      # application's scheduler.max_result_age setting or use your own policy.
+      - record: synthetic:check:fresh_failure
+        expr: |
+          (
+            max by (check_id, instance_id, state) (
+              synthetic_check_state{state="failure"} == 1
+            )
+            and on (check_id, instance_id)
+            (
+              (
+                max by (check_id, instance_id) (
+                  synthetic_check_last_run_timestamp_seconds
+                ) > 0
+              )
+              and on (check_id, instance_id)
+              (
+                time() - max by (check_id, instance_id) (
+                  synthetic_check_last_run_timestamp_seconds
+                ) <= 600
+              )
+            )
+          )
+          * on (check_id, instance_id) group_left (source_id, mode, target_set_id)
+          max by (check_id, instance_id, source_id, mode, target_set_id) (
+            synthetic_check_info == 1
+          )
+
+      - record: synthetic:check:age_seconds
+        expr: |
+          clamp_min(
+            time() - max by (check_id, instance_id) (
+              synthetic_check_last_run_timestamp_seconds
+            ),
+            0
+          )
+          and on (check_id, instance_id)
+          (
+            max by (check_id, instance_id) (
+              synthetic_check_last_run_timestamp_seconds
+            ) > 0
+          )
+
+      - record: synthetic:egress:fresh_mismatch
+        expr: |
+          (
+            max by (check_id, instance_id, assertion_id, state) (
+              synthetic_check_egress_state{state="mismatch"} == 1
+            )
+            and on (check_id, instance_id)
+            (
+              (
+                max by (check_id, instance_id) (
+                  synthetic_check_last_run_timestamp_seconds
+                ) > 0
+              )
+              and on (check_id, instance_id)
+              (
+                time() - max by (check_id, instance_id) (
+                  synthetic_check_last_run_timestamp_seconds
+                ) <= 600
+              )
+            )
+          )
+          * on (check_id, instance_id) group_left (source_id, mode, target_set_id)
+          max by (check_id, instance_id, source_id, mode, target_set_id) (
+            synthetic_check_info == 1
+          )
+
+      - record: synthetic:source_refresh:age_seconds
+        expr: |
+          clamp_min(
+            time() - max by (instance_id, source_id) (
+              synthetic_prober_source_last_success_timestamp_seconds
+            ),
+            0
+          )
+          and on (instance_id, source_id)
+          (
+            max by (instance_id, source_id) (
+              synthetic_prober_source_last_success_timestamp_seconds
+            ) > 0
+          )
