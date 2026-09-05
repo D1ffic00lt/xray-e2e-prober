@@ -144,7 +144,7 @@ scheduler:
   max_result_age: 180
 
 api:
-  # Safe default for a native process. compose.yaml overrides the bind address
+  # Safe default for a native process. docker-compose.yml overrides the bind address
   # inside the container and publishes it on 127.0.0.1 of the host only.
   host: 127.0.0.1
   port: 8080
