@@ -1263,7 +1263,7 @@ class ProberService:
                 target_set_id=definition.target_set_id,
                 generation=definition.generation,
                 config_revision=config_revision,
-                state=cycle.reachability.state,
+                state=cycle.overall_state,
                 started_at=cycle.started_at,
                 completed_at=cycle.completed_at,
                 success_count=cycle.reachability.success_count,

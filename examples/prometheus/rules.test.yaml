@@ -107,7 +107,7 @@ tests:
               summary: Expected Xray E2E Prober instance is down
               description: No healthy scrape target exists for expected instance edge-a.
 
-  - name: stale before first run execution error refresh failure and egress mismatch differ
+  - name: stale execution refresh and all egress failure modes are observable
     interval: 1m
     input_series:
       - series: 'synthetic_check_state{check_id="never-run",instance_id="edge-a",state="unknown"}'
@@ -145,6 +145,18 @@ tests:
       - series: 'synthetic_check_last_run_timestamp_seconds{check_id="egress-check",instance_id="edge-a"}'
         values: '2700x60'
       - series: 'synthetic_check_info{check_id="egress-check",instance_id="edge-a",source_id="source-a",mode="connection",target_set_id="web"}'
+        values: '1x60'
+      - series: 'synthetic_check_egress_state{check_id="egress-error",instance_id="edge-a",assertion_id="office-cidr",state="error"}'
+        values: '1x60'
+      - series: 'synthetic_check_info{check_id="egress-error",instance_id="edge-a",source_id="source-a",entry_name="RU Primary XTLS",mode="connection",target_set_id="web"}'
+        values: '1x60'
+      - series: 'synthetic_check_egress_state{check_id="egress-unknown",instance_id="edge-a",assertion_id="office-cidr",state="unknown"}'
+        values: '1x60'
+      - series: 'synthetic_check_info{check_id="egress-unknown",instance_id="edge-a",source_id="source-a",entry_name="RU Backup XTLS",mode="connection",target_set_id="web"}'
+        values: '1x60'
+      - series: 'synthetic_check_egress_state{check_id="egress-stale",instance_id="edge-a",assertion_id="office-cidr",state="stale"}'
+        values: '1x60'
+      - series: 'synthetic_check_info{check_id="egress-stale",instance_id="edge-a",source_id="source-a",entry_name="RU Legacy XTLS",mode="connection",target_set_id="web"}'
         values: '1x60'
     alert_rule_test:
       - eval_time: 20m
@@ -207,3 +219,45 @@ tests:
             exp_annotations:
               summary: Fresh egress assertion mismatch
               description: Assertion office-cidr for check egress-check observed an IP outside configured CIDRs.
+      - eval_time: 20m
+        alertname: SyntheticEgressAssertionUnavailable
+        exp_alerts:
+          - exp_labels:
+              assertion_id: office-cidr
+              check_id: egress-error
+              entry_name: RU Primary XTLS
+              instance_id: edge-a
+              mode: connection
+              severity: warning
+              source_id: source-a
+              state: error
+              target_set_id: web
+            exp_annotations:
+              summary: Egress assertion has no current result
+              description: Assertion office-cidr for check egress-error is error; the expected egress route is not confirmed.
+          - exp_labels:
+              assertion_id: office-cidr
+              check_id: egress-stale
+              entry_name: RU Legacy XTLS
+              instance_id: edge-a
+              mode: connection
+              severity: warning
+              source_id: source-a
+              state: stale
+              target_set_id: web
+            exp_annotations:
+              summary: Egress assertion has no current result
+              description: Assertion office-cidr for check egress-stale is stale; the expected egress route is not confirmed.
+          - exp_labels:
+              assertion_id: office-cidr
+              check_id: egress-unknown
+              entry_name: RU Backup XTLS
+              instance_id: edge-a
+              mode: connection
+              severity: warning
+              source_id: source-a
+              state: unknown
+              target_set_id: web
+            exp_annotations:
+              summary: Egress assertion has no current result
+              description: Assertion office-cidr for check egress-unknown is unknown; the expected egress route is not confirmed.

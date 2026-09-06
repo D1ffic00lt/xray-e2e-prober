@@ -51,7 +51,7 @@ def create_app(
 
     app = FastAPI(
         title="Xray E2E Prober",
-        version="0.1.0",
+        version="0.1.1",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -103,4 +103,3 @@ def create_app(
         )
 
     return app
-

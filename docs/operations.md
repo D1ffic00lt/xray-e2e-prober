@@ -24,12 +24,12 @@ docker compose build --pull prober
 запуск с именем уже существующего tag. Пример:
 
 ```console
-git tag -s v0.1.0 -m 'xray-e2e-prober v0.1.0'
-git push origin v0.1.0
+git tag -s v0.1.1 -m 'xray-e2e-prober v0.1.1'
+git push origin v0.1.1
 ```
 
 Workflow собирает один manifest list для `linux/amd64` и `linux/arm64`,
-публикует только tags `0.1.0` и `sha-FULL_COMMIT_SHA`, отказывается заменять уже
+публикует только tags `0.1.1` и `sha-FULL_COMMIT_SHA`, отказывается заменять уже
 существующий tag и прикрепляет BuildKit provenance (`mode=max`) и SBOM. Manifest
 digest записывается в job summary и artifact `container-*`. Ручной запуск не
 создаёт Git tag и принимает только существующий tag, который проходит ту же
@@ -40,7 +40,7 @@ workflow использует только `contents: read` и `packages: write`
 Зафиксируйте показанный manifest digest в deployment:
 
 ```console
-export PROBER_IMAGE='ghcr.io/OWNER/xray-e2e-prober:0.1.0@sha256:MANIFEST_DIGEST'
+export PROBER_IMAGE='ghcr.io/OWNER/xray-e2e-prober:0.1.1@sha256:MANIFEST_DIGEST'
 ```
 
 `OWNER` и `MANIFEST_DIGEST` — обязательные placeholders, а не существующий образ.

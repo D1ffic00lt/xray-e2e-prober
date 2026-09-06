@@ -131,3 +131,21 @@ groups:
         annotations:
           summary: "Fresh egress assertion mismatch"
           description: "Assertion {{ $labels.assertion_id }} for check {{ $labels.check_id }} observed an IP outside configured CIDRs."
+
+      - alert: SyntheticEgressAssertionUnavailable
+        expr: |
+          max by (check_id, instance_id, assertion_id, state) (
+            synthetic_check_egress_state{state=~"error|unknown|stale"} == 1
+          )
+          * on (check_id, instance_id) group_left (source_id, entry_name, mode, target_set_id)
+          max by (
+            check_id, instance_id, source_id, entry_name, mode, target_set_id
+          ) (
+            synthetic_check_info == 1
+          )
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Egress assertion has no current result"
+          description: "Assertion {{ $labels.assertion_id }} for check {{ $labels.check_id }} is {{ $labels.state }}; the expected egress route is not confirmed."

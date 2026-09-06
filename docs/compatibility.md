@@ -98,7 +98,8 @@ URL через профиль, но не конкретный VLESS outbound и�
 - Target поддерживает GET, status set, bounded exact/regex body и явную redirect
   policy. Все redirects идут через тот же runtime.
 - Egress endpoint поддерживает один plain IP либо JSON field, IPv4 и IPv6.
-  Результаты reachability и egress независимы.
+  Детальные результаты reachability и egress сохраняются раздельно, но
+  egress mismatch либо неполный/ошибочный результат ухудшает общий state чека.
 - `success/failure`, `unknown`, `error`, `stale`, `disabled` не взаимозаменяемы;
   scheduler/runtime error не публикуется как сетевой failure.
 

@@ -15,6 +15,7 @@ The example uses these policy values:
 - multi-instance confirmation: at least two distinct `instance_id` values;
 - source refresh failure: last success more than 30 minutes ago;
 - disabled checks never raise the stale alert, even with an old/zero timestamp;
+- egress `error`, `unknown`, or `stale`: continuously present for 5 minutes;
 - alert `for` values and severities are in `alerting_rules.yaml`.
 
 Tune them before production use. `instance_id` must identify an observation

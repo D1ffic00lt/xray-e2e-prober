@@ -880,6 +880,33 @@ class CycleResult(StrictModel):
     started_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime = Field(default_factory=utc_now)
 
+    @property
+    def overall_state(self) -> ReachabilityState:
+        """Combine reachability quorum and enabled egress assertion results."""
+
+        egress_states = {item.state for item in self.egress}
+        if (
+            self.reachability.state is ReachabilityState.ERROR
+            or EgressState.ERROR in egress_states
+        ):
+            return ReachabilityState.ERROR
+        if (
+            self.reachability.state is ReachabilityState.STALE
+            or EgressState.STALE in egress_states
+        ):
+            return ReachabilityState.STALE
+        if (
+            self.reachability.state is ReachabilityState.UNKNOWN
+            or EgressState.UNKNOWN in egress_states
+        ):
+            return ReachabilityState.UNKNOWN
+        if (
+            self.reachability.state is ReachabilityState.FAILURE
+            or EgressState.MISMATCH in egress_states
+        ):
+            return ReachabilityState.FAILURE
+        return self.reachability.state
+
 
 class RunResult(StrictModel):
     run_id: str

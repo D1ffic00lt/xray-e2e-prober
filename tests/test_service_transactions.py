@@ -12,6 +12,8 @@ from xray_e2e_prober.identity import IdentityRegistry
 from xray_e2e_prober.models import (
     AppConfig,
     CycleResult,
+    EgressResult,
+    EgressState,
     EntryRecord,
     ReachabilityResult,
     ReachabilityState,
@@ -94,6 +96,70 @@ def _generation(source_id: str = "src") -> SourceGeneration:
             mode="connection", generation="g1", payload="vless://secret",
         )],
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_egress_mismatch_sets_failure_state_and_status_metric(
+    tmp_path: Path,
+) -> None:
+    raw = _source_config(tmp_path).model_dump(mode="python")
+    raw["sources"][0]["egress_assertion_ids"] = ["exit"]
+    raw["egress_assertions"] = [
+        {
+            "assertion_id": "exit",
+            "name": "expected exit",
+            "url": "https://example.test/ip",
+            "expected_cidrs": ["192.0.2.0/24"],
+        }
+    ]
+    config = AppConfig.model_validate(raw)
+    generation = _generation()
+    inventory = compile_inventory(config, {"src": generation})
+    check = next(iter(inventory.values()))
+    service = ProberService(tmp_path, schedule_enabled=False, control_enabled=False)
+    service.config = config
+    service.inventory = inventory
+
+    class Pool:
+        active_count = 0
+
+        @asynccontextmanager
+        async def acquire(self, _check):
+            yield SimpleNamespace(socks_port=1080, socks_host="127.0.0.1")
+
+    class Checker:
+        async def run_cycle(self, definition, *_args, **_kwargs):
+            return CycleResult(
+                check_id=definition.check_id,
+                generation=definition.generation,
+                reachability=ReachabilityResult(
+                    state=ReachabilityState.SUCCESS,
+                    success_count=1,
+                    quorum=1,
+                    targets=[],
+                ),
+                egress=[
+                    EgressResult(
+                        assertion_id="exit",
+                        state=EgressState.MISMATCH,
+                        reason=Reason.EGRESS_MISMATCH,
+                    )
+                ],
+            )
+
+    service._pool = Pool()  # type: ignore[assignment]
+    service._checker = Checker()  # type: ignore[assignment]
+
+    result = await service.execute(check)
+
+    assert result.state is ReachabilityState.FAILURE
+    snapshot = service.check_snapshot(check.definition.check_id)
+    assert snapshot is not None and snapshot["state"] == "failure"
+    metrics = service.metrics.render().decode()
+    assert (
+        f'synthetic_check_status{{check_id="{check.definition.check_id}",'
+        'instance_id="transaction-test"} 0.0'
+    ) in metrics
 
 
 @pytest.mark.asyncio

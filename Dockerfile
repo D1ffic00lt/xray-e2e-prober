@@ -64,7 +64,7 @@ CMD ["pytest", "-m", "integration", "-q"]
 
 FROM ${PYTHON_IMAGE} AS runtime
 
-ARG APP_VERSION=0.1.0
+ARG APP_VERSION=0.1.1
 ARG XRAY_VERSION=26.3.27
 
 LABEL org.opencontainers.image.title="xray-e2e-prober" \

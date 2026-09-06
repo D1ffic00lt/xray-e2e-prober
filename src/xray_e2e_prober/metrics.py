@@ -27,7 +27,14 @@ class CurrentStateCollector:
         info = GaugeMetricFamily(
             "synthetic_check_info",
             "Accepted check inventory",
-            labels=["check_id", "instance_id", "source_id", "mode", "target_set_id"],
+            labels=[
+                "check_id",
+                "instance_id",
+                "source_id",
+                "entry_name",
+                "mode",
+                "target_set_id",
+            ],
         )
         state = GaugeMetricFamily(
             "synthetic_check_state",
@@ -88,6 +95,7 @@ class CurrentStateCollector:
                     check_id,
                     instance,
                     str(check["source_id"]),
+                    str(check.get("entry_name", "")),
                     str(check["mode"]),
                     str(check["target_set_id"]),
                 ],
@@ -198,4 +206,3 @@ class Metrics:
 
     def render(self) -> bytes:
         return generate_latest(self.registry)
-

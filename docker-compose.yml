@@ -4,7 +4,7 @@ services:
   prober:
     # A fixed local tag keeps the example usable from source. In production set
     # PROBER_IMAGE to a released tag plus digest; see docs/operations.md.
-    image: ${PROBER_IMAGE:-xray-e2e-prober:0.1.0}
+    image: ${PROBER_IMAGE:-xray-e2e-prober:0.1.1}
     pull_policy: missing
     build:
       context: .
