@@ -1577,6 +1577,11 @@ class ProberService:
                     "kind": (
                         "throughput" if item.throughput is not None else "reachability"
                     ),
+                    "direction": (
+                        item.throughput.direction
+                        if item.throughput is not None
+                        else None
+                    ),
                     "state": (
                         "unknown" if definition.enabled and item.enabled else "disabled"
                     ),
@@ -1632,6 +1637,11 @@ class ProberService:
                         if target.throughput is not None
                         else "reachability"
                     ),
+                    "direction": (
+                        target.throughput.direction
+                        if target.throughput is not None
+                        else None
+                    ),
                     "state": "stale" if target.enabled else "disabled",
                 }
                 for target in check.target_set.targets
@@ -1657,6 +1667,11 @@ class ProberService:
                                 if target.throughput is not None
                                 else "reachability"
                             ),
+                            "direction": (
+                                target.throughput.direction
+                                if target.throughput is not None
+                                else None
+                            ),
                             "state": "disabled",
                         }
                     )
@@ -1668,6 +1683,11 @@ class ProberService:
                                 "throughput"
                                 if target.throughput is not None
                                 else "reachability"
+                            ),
+                            "direction": (
+                                target.throughput.direction
+                                if target.throughput is not None
+                                else None
                             ),
                             "state": (
                                 "error"
@@ -1689,12 +1709,18 @@ class ProberService:
                                 if target.throughput is not None
                                 else "reachability"
                             ),
+                            "direction": (
+                                target.throughput.direction
+                                if target.throughput is not None
+                                else None
+                            ),
                             "state": item.state.value,
                             "reason": item.reason.value if item.reason else None,
                             "http_status": item.http_status,
                             "duration_seconds": item.duration_seconds,
                             "ttfb_seconds": item.ttfb_seconds,
                             "bytes_read": item.bytes_read,
+                            "bytes_written": item.bytes_written,
                             "transfer_seconds": item.transfer_seconds,
                             "throughput_mbps": item.throughput_mbps,
                             "measurement_timestamp": (
@@ -1821,6 +1847,7 @@ class ProberService:
                     "duration_seconds": item.duration_seconds,
                     "ttfb_seconds": item.ttfb_seconds,
                     "bytes_read": item.bytes_read,
+                    "bytes_written": item.bytes_written,
                     "transfer_seconds": item.transfer_seconds,
                     "throughput_mbps": item.throughput_mbps,
                     "measurement_timestamp": (

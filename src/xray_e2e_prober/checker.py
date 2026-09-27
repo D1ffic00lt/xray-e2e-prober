@@ -41,6 +41,7 @@ class _ResponseData:
     status_code: int
     body: bytes
     bytes_read: int
+    bytes_written: int
     duration_seconds: float
     ttfb_seconds: float | None
     transfer_seconds: float | None
@@ -62,6 +63,41 @@ _MIN_THROUGHPUT_BYTES = 64 * 1024
 _MAX_THROUGHPUT_BYTES = 64 * 1024 * 1024
 _MIN_THROUGHPUT_INTERVAL = 60.0
 _MAX_THROUGHPUT_INTERVAL = 24 * 60 * 60.0
+
+
+@dataclass(frozen=True, slots=True)
+class _ThroughputSettings:
+    direction: str
+    expected_bytes: int
+    interval: float
+
+
+class _BoundedUploadStream(httpx.AsyncByteStream):
+    """Generate a fixed-size request body without retaining it in memory."""
+
+    def __init__(self, size: int, clock: Callable[[], float]) -> None:
+        self.size = size
+        self.clock = clock
+        self.bytes_written = 0
+        self.started_at: float | None = None
+        self.completed_at: float | None = None
+
+    async def __aiter__(self):
+        self.started_at = self.clock()
+        chunk = b"\0" * (64 * 1024)
+        remaining = self.size
+        while remaining:
+            current = chunk if remaining >= len(chunk) else chunk[:remaining]
+            yield current
+            self.bytes_written += len(current)
+            remaining -= len(current)
+        self.completed_at = self.clock()
+
+    @property
+    def elapsed(self) -> float | None:
+        if self.started_at is None or self.completed_at is None:
+            return None
+        return max(self.completed_at - self.started_at, 1e-9)
 
 
 @dataclass(slots=True)
@@ -246,12 +282,17 @@ def _body_limit(value: Any, default: int) -> int:
     return value
 
 
-def _throughput_settings(target: Any) -> tuple[int, float] | None:
+def _throughput_settings(target: Any) -> _ThroughputSettings | None:
     value = _field(target, "throughput")
     if value is None:
         return None
     expected_bytes = _field(value, "expected_bytes")
     interval = _field(value, "interval", 30 * 60)
+    direction = _field(value, "direction", "download")
+    if direction not in {"download", "upload"}:
+        raise CheckerConfigurationError(
+            "throughput direction must be download or upload"
+        )
     if (
         isinstance(expected_bytes, bool)
         or not isinstance(expected_bytes, int)
@@ -268,7 +309,7 @@ def _throughput_settings(target: Any) -> tuple[int, float] | None:
         raise CheckerConfigurationError(
             "throughput interval must be between 60 and 86400 seconds"
         )
-    return expected_bytes, float(interval)
+    return _ThroughputSettings(direction, expected_bytes, float(interval))
 
 
 def _measurement_time(result: Any) -> datetime | None:
@@ -437,13 +478,17 @@ def _redirect_limit(target: Any) -> int:
 def _validate_target(target: Any, default_timeout: float, default_body_limit: int) -> None:
     _target_id(target)
     _absolute_http_url(_field(target, "url"), kind="target")
-    if _field(target, "method", "GET") != "GET":
-        raise CheckerConfigurationError("only GET targets are supported")
+    method = _field(target, "method", "GET")
     _statuses(target)
     _positive_timeout(
         _field(target, "timeout", _field(target, "timeout_seconds")), default_timeout
     )
     throughput = _throughput_settings(target)
+    expected_method = "POST" if throughput and throughput.direction == "upload" else "GET"
+    if method != expected_method:
+        raise CheckerConfigurationError(
+            f"{throughput.direction if throughput else 'reachability'} target requires {expected_method}"
+        )
     _body_limit(_field(target, "max_body_bytes"), default_body_limit)
     follow = bool(_field(target, "follow_redirects", False))
     redirects = _redirect_limit(target)
@@ -453,6 +498,10 @@ def _validate_target(target: Any, default_timeout: float, default_body_limit: in
     if throughput is not None and matcher is not None:
         raise CheckerConfigurationError(
             "throughput targets cannot define a body matcher"
+        )
+    if throughput is not None and throughput.direction == "upload" and follow:
+        raise CheckerConfigurationError(
+            "upload throughput targets cannot follow redirects"
         )
 
 
@@ -613,6 +662,7 @@ class Checker:
         client: httpx.AsyncClient,
         *,
         url: str,
+        method: str,
         body_limit: int,
         follow_redirects: bool,
         max_redirects: int,
@@ -620,6 +670,7 @@ class Checker:
         read_body: bool,
         retain_body: bool = True,
         expected_body_bytes: int | None = None,
+        upload_body_bytes: int | None = None,
         observation: _TTFBObservation | None = None,
     ) -> _ResponseData:
         loop = asyncio.get_running_loop()
@@ -627,6 +678,7 @@ class Checker:
         observation = observation or _TTFBObservation(started=started, clock=loop.time)
         body = bytearray()
         bytes_read = 0
+        bytes_written = 0
         current_url = url
         redirect_count = 0
         transfer_seconds: float | None = None
@@ -638,14 +690,31 @@ class Checker:
         token = _ACTIVE_TTFB.set(observation)
         try:
             while True:
+                upload_stream = (
+                    _BoundedUploadStream(upload_body_bytes, loop.time)
+                    if upload_body_bytes is not None
+                    else None
+                )
                 async with client.stream(
-                    "GET",
+                    method,
                     current_url,
+                    content=upload_stream,
+                    headers=(
+                        {
+                            "Content-Length": str(upload_body_bytes),
+                            "Content-Type": "application/octet-stream",
+                        }
+                        if upload_body_bytes is not None
+                        else None
+                    ),
                     # This must remain false: per-target redirect policy is
                     # enforced by the loop below, not shared client state.
                     follow_redirects=False,
                     extensions={"trace": trace},
                 ) as response:
+                    if upload_stream is not None:
+                        bytes_written = upload_stream.bytes_written
+                        transfer_seconds = upload_stream.elapsed
                     status = response.status_code
                     location = response.headers.get("location")
                     if (
@@ -712,6 +781,7 @@ class Checker:
             status_code=status,
             body=bytes(body),
             bytes_read=bytes_read,
+            bytes_written=bytes_written,
             duration_seconds=loop.time() - started,
             ttfb_seconds=observation.elapsed,
             transfer_seconds=transfer_seconds,
@@ -739,8 +809,8 @@ class Checker:
                 self.request_timeout,
             )
             max_body = (
-                throughput[0]
-                if throughput is not None
+                throughput.expected_bytes
+                if throughput is not None and throughput.direction == "download"
                 else _body_limit(
                     _field(target, "max_body_bytes"), self.default_body_limit
                 )
@@ -764,14 +834,30 @@ class Checker:
                         response = await self._request(
                             client,
                             url=url,
+                            method=_field(target, "method", "GET"),
                             body_limit=max_body,
                             follow_redirects=follow,
                             max_redirects=max_redirects,
                             accepted_statuses=statuses,
-                            read_body=matcher is not None or throughput is not None,
+                            read_body=(
+                                matcher is not None
+                                or (
+                                    throughput is not None
+                                    and throughput.direction == "download"
+                                )
+                            ),
                             retain_body=matcher is not None,
                             expected_body_bytes=(
-                                throughput[0] if throughput is not None else None
+                                throughput.expected_bytes
+                                if throughput is not None
+                                and throughput.direction == "download"
+                                else None
+                            ),
+                            upload_body_bytes=(
+                                throughput.expected_bytes
+                                if throughput is not None
+                                and throughput.direction == "upload"
+                                else None
                             ),
                             observation=observation,
                         )
@@ -797,6 +883,7 @@ class Checker:
                     duration_seconds=duration,
                     ttfb_seconds=response.ttfb_seconds,
                     bytes_read=response.bytes_read,
+                    bytes_written=response.bytes_written,
                     transfer_seconds=response.transfer_seconds,
                     measurement_timestamp=measured_at,
                     error="unexpected HTTP status",
@@ -819,7 +906,14 @@ class Checker:
                 if response.transfer_seconds is None or response.transfer_seconds <= 0:
                     raise _InvalidResponse("throughput transfer duration is unavailable")
                 throughput_mbps = (
-                    response.bytes_read * 8 / response.transfer_seconds / 1_000_000
+                    (
+                        response.bytes_written
+                        if throughput.direction == "upload"
+                        else response.bytes_read
+                    )
+                    * 8
+                    / response.transfer_seconds
+                    / 1_000_000
                 )
             return TargetResult(
                 target_id=target_id,
@@ -828,6 +922,7 @@ class Checker:
                 duration_seconds=duration,
                 ttfb_seconds=response.ttfb_seconds,
                 bytes_read=response.bytes_read,
+                bytes_written=response.bytes_written,
                 transfer_seconds=response.transfer_seconds,
                 throughput_mbps=throughput_mbps,
                 measurement_timestamp=measured_at,
@@ -889,6 +984,7 @@ class Checker:
                     response = await self._request(
                         client,
                         url=url,
+                        method="GET",
                         body_limit=self.egress_body_limit,
                         follow_redirects=False,
                         max_redirects=0,
@@ -1024,7 +1120,7 @@ class Checker:
                 and measured_at is not None
             ):
                 age = (now - measured_at).total_seconds()
-                if 0 <= age < throughput[1]:
+                if 0 <= age < throughput.interval:
                     cached_results[target_id] = previous
                     continue
             if (
@@ -1038,7 +1134,7 @@ class Checker:
                 if due_at is None:
                     digest = hashlib.sha256(schedule_id.encode("utf-8")).digest()
                     fraction = int.from_bytes(digest[:8], "big") / 2**64
-                    interval = throughput[1]
+                    interval = throughput.interval
                     offset = fraction * interval
                     due_timestamp = (
                         ((now.timestamp() - offset) // interval + 1) * interval

@@ -95,3 +95,45 @@ def test_metrics_export_throughput_separately_from_reachability_targets() -> Non
     ]
     assert all('target_id="download"' not in line for line in target_state_lines)
     assert any('target_id="health"' in line for line in target_state_lines)
+
+
+def test_metrics_export_upload_throughput_separately() -> None:
+    state = {
+        "instance_id": "instance-a",
+        "config_reload_success": True,
+        "checks": [
+            {
+                "check_id": "c1",
+                "source_id": "s1",
+                "entry_name": "DE Primary",
+                "mode": "connection",
+                "target_set_id": "ts1",
+                "state": "success",
+                "targets": [
+                    {
+                        "target_id": "upload",
+                        "kind": "throughput",
+                        "direction": "upload",
+                        "state": "success",
+                        "bytes_written": 8_388_608,
+                        "transfer_seconds": 2.0,
+                        "throughput_mbps": 33.554432,
+                        "measurement_timestamp": 1_800_000_000,
+                    }
+                ],
+            }
+        ],
+    }
+
+    rendered = Metrics(lambda: state).render().decode()
+
+    assert (
+        'synthetic_check_upload_mbps{check_id="c1",instance_id="instance-a",'
+        'target_id="upload"} 33.554432'
+    ) in rendered
+    assert _sample_values(rendered, "synthetic_check_upload_bytes") == [8_388_608]
+    assert _sample_values(rendered, "synthetic_check_upload_transfer_seconds") == [2.0]
+    assert _sample_values(
+        rendered, "synthetic_check_upload_last_run_timestamp_seconds"
+    ) == [1_800_000_000]
+    assert 'synthetic_check_download_mbps{check_id="c1"' not in rendered

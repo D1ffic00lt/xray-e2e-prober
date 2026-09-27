@@ -268,8 +268,9 @@ class BodyMatcher(StrictModel):
 
 
 class ThroughputConfig(StrictModel):
-    """Bounded, low-frequency download measurement for one HTTP target."""
+    """Bounded, low-frequency transfer measurement for one HTTP target."""
 
+    direction: Literal["download", "upload"] = "download"
     expected_bytes: int = Field(ge=64 * 1024, le=64 * 1024 * 1024)
     interval: float = Field(default=30 * 60, ge=60, le=24 * 60 * 60)
 
@@ -278,7 +279,7 @@ class TargetConfig(StrictModel):
     target_id: str
     name: str
     url: str
-    method: Literal["GET"] = "GET"
+    method: Literal["GET", "POST"] = "GET"
     expected_statuses: set[int] = Field(default_factory=lambda: {200}, min_length=1)
     timeout: float | None = Field(default=None, gt=0)
     body: BodyMatcher | None = None
@@ -338,6 +339,18 @@ class TargetConfig(StrictModel):
     def valid_redirect_policy(self) -> "TargetConfig":
         if self.throughput is not None and self.body is not None:
             raise ValueError("throughput targets cannot define a body matcher")
+        if self.throughput is None and self.method != "GET":
+            raise ValueError("POST is supported only for upload throughput targets")
+        if self.throughput is not None:
+            expected_method = (
+                "POST" if self.throughput.direction == "upload" else "GET"
+            )
+            if self.method != expected_method:
+                raise ValueError(
+                    f"{self.throughput.direction} throughput requires {expected_method}"
+                )
+            if self.throughput.direction == "upload" and self.follow_redirects:
+                raise ValueError("upload throughput targets cannot follow redirects")
         if not self.follow_redirects and self.max_redirects:
             raise ValueError("max_redirects requires follow_redirects=true")
         if self.follow_redirects and self.max_redirects == 0:
@@ -849,6 +862,7 @@ class TargetResult(StrictModel):
     duration_seconds: float | None = Field(default=None, ge=0)
     ttfb_seconds: float | None = Field(default=None, ge=0)
     bytes_read: int | None = Field(default=None, ge=0)
+    bytes_written: int | None = Field(default=None, ge=0)
     transfer_seconds: float | None = Field(default=None, gt=0)
     throughput_mbps: float | None = Field(default=None, ge=0)
     measurement_timestamp: datetime | None = None

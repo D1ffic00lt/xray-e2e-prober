@@ -312,6 +312,63 @@ async def test_throughput_download_is_bounded_cached_and_excluded_from_quorum() 
 
 
 @pytest.mark.asyncio
+async def test_throughput_upload_streams_exact_body_and_is_excluded_from_quorum() -> None:
+    upload_bytes = 64 * 1024
+    requests: list[tuple[str, int, str | None]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = await request.aread()
+        requests.append((request.method, len(body), request.headers.get("content-length")))
+        return httpx.Response(
+            204 if request.url.host == "health.test" else 200,
+            request=request,
+        )
+
+    target_set = TargetSetConfig(
+        target_set_id="throughput-upload",
+        name="throughput upload",
+        quorum=1,
+        targets=[
+            TargetConfig(
+                target_id="health",
+                name="health",
+                url="https://health.test/",
+                expected_statuses={204},
+            ),
+            TargetConfig(
+                target_id="upload",
+                name="upload",
+                url="https://upload.test/__up",
+                method="POST",
+                timeout=5,
+                throughput={
+                    "direction": "upload",
+                    "expected_bytes": upload_bytes,
+                    "interval": 1800,
+                },
+            ),
+        ],
+    )
+
+    reachability, _ = await Checker(client_factory=_factory(handler)).check_target_set(
+        target_set, 18082
+    )
+    upload = next(item for item in reachability.targets if item.target_id == "upload")
+
+    assert reachability.state is ReachabilityState.SUCCESS
+    assert reachability.success_count == 1
+    assert upload.state is ReachabilityState.SUCCESS
+    assert upload.bytes_written == upload_bytes
+    assert upload.bytes_read == 0
+    assert upload.transfer_seconds is not None
+    assert upload.transfer_seconds > 0
+    assert upload.throughput_mbps is not None
+    assert upload.throughput_mbps > 0
+    assert upload.measurement_timestamp is not None
+    assert ("POST", upload_bytes, str(upload_bytes)) in requests
+
+
+@pytest.mark.asyncio
 async def test_throughput_download_rejects_wrong_content_length_without_failing_health() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "download.test":

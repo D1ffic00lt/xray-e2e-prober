@@ -125,12 +125,13 @@ target_sets:
         max_redirects: 0
 ```
 
-Метод MVP — только `GET`. Проверка body бывает `exact` или `regex`; чтение
+Обычные reachability-targets используют только `GET`; `POST` разрешён только
+для upload throughput-target. Проверка body бывает `exact` или `regex`; чтение
 ограничено `max_body_bytes`. Redirect по умолчанию запрещён. При включении
 `follow_redirects` задайте `max_redirects` (если оставить 0, валидатор schema v1
 применит 5). Все переходы обязаны идти через тот же Xray runtime.
 
-### Ограниченное измерение download throughput
+### Ограниченное измерение download/upload throughput
 
 Target с блоком `throughput` потоково читает тело через тот же Xray runtime, не
 сохраняя его в памяти и не передавая содержимое в API/Prometheus:
@@ -143,6 +144,25 @@ Target с блоком `throughput` потоково читает тело че�
         expected_statuses: [200]
         timeout: 30
         throughput:
+          direction: download
+          expected_bytes: 8388608
+          interval: 1800
+        follow_redirects: false
+        enabled: true
+```
+
+Для upload используется отдельный `POST` target; фиксированное тело генерируется
+потоком и отправляется через тот же Xray runtime:
+
+```yaml
+      - target_id: controlled-upload
+        name: Controlled 8 MiB upload
+        url: https://upload.example/__up
+        method: POST
+        expected_statuses: [200]
+        timeout: 30
+        throughput:
+          direction: upload
           expected_bytes: 8388608
           interval: 1800
         follow_redirects: false
@@ -170,10 +190,15 @@ reachability check и не включает существующие target aler
 - `synthetic_check_download_transfer_seconds`;
 - `synthetic_check_download_last_run_timestamp_seconds`;
 - `synthetic_check_download_state` и `synthetic_check_download_success`.
+- `synthetic_check_upload_mbps`;
+- `synthetic_check_upload_bytes`;
+- `synthetic_check_upload_transfer_seconds`;
+- `synthetic_check_upload_last_run_timestamp_seconds`;
+- `synthetic_check_upload_state` и `synthetic_check_upload_success`.
 
-Используйте фиксированный несжимаемый объект на контролируемом HTTPS-origin,
+Используйте фиксированный объект и upload endpoint на контролируемом HTTPS-origin,
 который не расположен на проверяемой VPN-ноде. По умолчанию prober выполняет не
-более одного throughput download одновременно; предел задаёт
+более одного throughput transfer одновременно; предел задаёт
 `scheduler.max_parallel_throughput_requests`. Держите timeout throughput-target
 ниже обычного `scheduler.interval`, чтобы медленный origin не задерживал
 следующий reachability-цикл того же check.

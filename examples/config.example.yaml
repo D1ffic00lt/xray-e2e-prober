@@ -101,6 +101,22 @@ target_sets:
         expected_statuses: [200]
         timeout: 30
         throughput:
+          direction: download
+          expected_bytes: 8388608
+          interval: 1800
+        follow_redirects: false
+        max_redirects: 0
+        enabled: false
+      # Diagnostic upload measurement. The request body is generated as a
+      # bounded stream and is never retained or exposed by the prober.
+      - target_id: controlled-upload
+        name: Controlled 8 MiB upload
+        url: https://upload.example.invalid/__up
+        method: POST
+        expected_statuses: [200]
+        timeout: 30
+        throughput:
+          direction: upload
           expected_bytes: 8388608
           interval: 1800
         follow_redirects: false
@@ -155,7 +171,7 @@ scheduler:
   observatory_warmup_timeout: 30
   max_active_runtimes: 8
   max_parallel_requests: 32
-  # Throughput downloads are separately serialized by default.
+  # Throughput transfers are separately serialized by default.
   max_parallel_throughput_requests: 1
   max_queue_size: 1024
   max_result_age: 180

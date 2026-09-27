@@ -96,6 +96,36 @@ class CurrentStateCollector:
             "Completion time of the last throughput measurement",
             labels=["check_id", "instance_id", "target_id"],
         )
+        upload_state = GaugeMetricFamily(
+            "synthetic_check_upload_state",
+            "One-hot current state of a bounded upload measurement",
+            labels=["check_id", "instance_id", "target_id", "state"],
+        )
+        upload_success = GaugeMetricFamily(
+            "synthetic_check_upload_success",
+            "One for a complete throughput upload and zero for confirmed failure",
+            labels=["check_id", "instance_id", "target_id"],
+        )
+        upload_bytes = GaugeMetricFamily(
+            "synthetic_check_upload_bytes",
+            "Bytes written by the last bounded throughput measurement",
+            labels=["check_id", "instance_id", "target_id"],
+        )
+        upload_transfer = GaugeMetricFamily(
+            "synthetic_check_upload_transfer_seconds",
+            "Request body transfer duration of the last bounded throughput measurement",
+            labels=["check_id", "instance_id", "target_id"],
+        )
+        upload_mbps = GaugeMetricFamily(
+            "synthetic_check_upload_mbps",
+            "Measured upload throughput in decimal megabits per second",
+            labels=["check_id", "instance_id", "target_id"],
+        )
+        upload_timestamp = GaugeMetricFamily(
+            "synthetic_check_upload_last_run_timestamp_seconds",
+            "Completion time of the last upload throughput measurement",
+            labels=["check_id", "instance_id", "target_id"],
+        )
         last_run = GaugeMetricFamily(
             "synthetic_check_last_run_timestamp_seconds",
             "Completion time for the current generation",
@@ -143,30 +173,38 @@ class CurrentStateCollector:
                 target_labels = labels + [target_id]
                 current_target_state = str(target.get("state", "unknown"))
                 if target.get("kind", "reachability") == "throughput":
+                    is_upload = target.get("direction", "download") == "upload"
+                    throughput_state = upload_state if is_upload else download_state
+                    throughput_success = upload_success if is_upload else download_success
+                    throughput_bytes = upload_bytes if is_upload else download_bytes
+                    throughput_transfer = upload_transfer if is_upload else download_transfer
+                    throughput_mbps = upload_mbps if is_upload else download_mbps
+                    throughput_timestamp = upload_timestamp if is_upload else download_timestamp
                     for possible in TARGET_STATES:
-                        download_state.add_metric(
+                        throughput_state.add_metric(
                             target_labels + [possible],
                             float(current_target_state == possible),
                         )
                     if current_target_state in {"success", "failure"}:
-                        download_success.add_metric(
+                        throughput_success.add_metric(
                             target_labels,
                             float(current_target_state == "success"),
                         )
-                    if target.get("bytes_read") is not None:
-                        download_bytes.add_metric(
-                            target_labels, float(target["bytes_read"])
+                    byte_field = "bytes_written" if is_upload else "bytes_read"
+                    if target.get(byte_field) is not None:
+                        throughput_bytes.add_metric(
+                            target_labels, float(target[byte_field])
                         )
                     if target.get("transfer_seconds") is not None:
-                        download_transfer.add_metric(
+                        throughput_transfer.add_metric(
                             target_labels, float(target["transfer_seconds"])
                         )
                     if target.get("throughput_mbps") is not None:
-                        download_mbps.add_metric(
+                        throughput_mbps.add_metric(
                             target_labels, float(target["throughput_mbps"])
                         )
                     if target.get("measurement_timestamp") is not None:
-                        download_timestamp.add_metric(
+                        throughput_timestamp.add_metric(
                             target_labels,
                             float(target["measurement_timestamp"]),
                         )
@@ -252,6 +290,12 @@ class CurrentStateCollector:
             download_transfer,
             download_mbps,
             download_timestamp,
+            upload_state,
+            upload_success,
+            upload_bytes,
+            upload_transfer,
+            upload_mbps,
+            upload_timestamp,
             last_run,
             egress_state,
             egress_match,

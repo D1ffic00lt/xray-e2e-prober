@@ -9,6 +9,7 @@ from xray_e2e_prober.models import (
     EgressState,
     ReachabilityResult,
     ReachabilityState,
+    TargetConfig,
 )
 
 
@@ -46,6 +47,46 @@ def test_duplicate_assignment_egress_references_are_rejected(tmp_path: Path) -> 
     }]
     with pytest.raises(ValueError, match="egress_assertion_ids"):
         AppConfig.model_validate(raw)
+
+
+def test_upload_throughput_requires_post_without_redirects() -> None:
+    target = TargetConfig(
+        target_id="upload",
+        name="upload",
+        url="https://upload.test/__up",
+        method="POST",
+        throughput={
+            "direction": "upload",
+            "expected_bytes": 65_536,
+        },
+    )
+    assert target.method == "POST"
+    assert target.throughput is not None
+    assert target.throughput.direction == "upload"
+
+    with pytest.raises(ValueError, match="upload throughput requires POST"):
+        TargetConfig(
+            target_id="upload",
+            name="upload",
+            url="https://upload.test/__up",
+            throughput={
+                "direction": "upload",
+                "expected_bytes": 65_536,
+            },
+        )
+
+    with pytest.raises(ValueError, match="cannot follow redirects"):
+        TargetConfig(
+            target_id="upload",
+            name="upload",
+            url="https://upload.test/__up",
+            method="POST",
+            throughput={
+                "direction": "upload",
+                "expected_bytes": 65_536,
+            },
+            follow_redirects=True,
+        )
 
 
 @pytest.mark.parametrize(
