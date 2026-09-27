@@ -370,7 +370,11 @@
   "templating": {
     "list": [
       {
-        "current": {},
+        "current": {
+          "selected": true,
+          "text": "Prometheus RU2",
+          "value": "ffywhlx20uolcf"
+        },
         "definition": "prometheus",
         "hide": 0,
         "includeAll": false,
