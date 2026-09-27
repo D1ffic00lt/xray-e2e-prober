@@ -2,7 +2,7 @@
 
 `prober` предоставляет интерактивную настройку, управление inventory и
 однократные проверки поверх того же состояния, которое использует daemon. Эта
-страница описывает публичный CLI `0.1.x`; актуальную форму конкретной команды
+страница описывает публичный CLI `0.2.x`; актуальную форму конкретной команды
 всегда можно проверить через `prober COMMAND --help`.
 
 ## Пути и режим выполнения
@@ -47,7 +47,7 @@ completion и также не открывают state prober.
 | `prober targets edit` | `--data-dir`, `--config` | Интерактивно редактирует target sets и quorum. |
 | `prober assignments edit` | `--data-dir`, `--config` | Интерактивно редактирует индивидуальные и сохранённые правила назначения. |
 | `prober egress edit` | `--data-dir`, `--config` | Интерактивно создаёт, заменяет или удаляет egress assertion; при удалении очищает ссылки sources и assignments. |
-| `prober check run [CHECK_ID]` | `--once`/`--no-once`, `--json`, общие пути | Выполняет один check или все включённые checks. One-shot — единственный режим `0.1.x`; используйте явный `--once`. |
+| `prober check run [CHECK_ID]` | `--once`/`--no-once`, `--json`, общие пути | Выполняет один check или все включённые checks. One-shot — единственный режим `0.2.x`; используйте явный `--once`. |
 | `prober status` | `--json`, `--data-dir`, `--config` | Показывает instance, sources, scheduler/queue и краткие состояния checks. |
 | `prober config validate [PATH]` | `--json`, `--data-dir`, `--config` | Строго валидирует указанный файл либо выбранную активную конфигурацию без применения. |
 | `prober config export` | `--output PATH`/`-o`, `--json`, `--data-dir`, `--config` | Экспортирует переносимый secret-free bundle: конфигурацию, безопасные ID mappings и ожидаемый LKG inventory. |

@@ -103,6 +103,60 @@ def test_safe_yaml_rejects_duplicate_keys_custom_tags_and_wrong_version() -> Non
         loads_config("instance_id: instance_local\n")
 
 
+def test_throughput_targets_are_bounded_and_do_not_count_towards_quorum() -> None:
+    download = TargetConfig(
+        target_id="download",
+        name="Download",
+        url="https://download.example/object.bin",
+        throughput={"expected_bytes": 8 * 1024 * 1024, "interval": 1800},
+    )
+    health = TargetConfig(
+        target_id="health",
+        name="Health",
+        url="https://health.example/",
+    )
+
+    target_set = TargetSetConfig(
+        target_set_id="set",
+        name="Set",
+        targets=[health, download],
+        quorum=1,
+    )
+
+    assert target_set.targets[1].throughput is not None
+    assert target_set.targets[1].throughput.expected_bytes == 8 * 1024 * 1024
+    with pytest.raises(ValueError, match="reachability targets"):
+        TargetSetConfig(
+            target_set_id="bad",
+            name="Bad",
+            targets=[health, download],
+            quorum=2,
+        )
+    with pytest.raises(ValueError, match="body matcher"):
+        TargetConfig(
+            target_id="bad-download",
+            name="Bad download",
+            url="https://download.example/object.bin",
+            body={"kind": "regex", "value": ".*"},
+            throughput={"expected_bytes": 65536},
+        )
+    with pytest.raises(ValueError, match="less than scheduler interval"):
+        AppConfig(
+            instance_id="bad-timeout",
+            target_sets=[
+                TargetSetConfig(
+                    target_set_id="timed",
+                    name="Timed",
+                    targets=[
+                        health,
+                        download.model_copy(update={"timeout": 60}),
+                    ],
+                    quorum=1,
+                )
+            ],
+        )
+
+
 def test_secret_reference_resolution(tmp_path: Path) -> None:
     key = tmp_path / "api-key"
     key.write_text("from-file\n")

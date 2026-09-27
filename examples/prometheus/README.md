@@ -23,6 +23,35 @@ point and must not be added by a scrape replica. A third successful observation
 does not negate two failures; the corresponding alert deliberately says
 "multiple observation instances", not "global outage".
 
+## Grafana: download throughput
+
+Throughput-targets intentionally have no bundled alert rules. First collect a
+baseline and use the dedicated metrics without mixing them into reachability:
+
+```promql
+# Current Mbps, enriched with the safe inbound display name.
+synthetic_check_download_mbps
+  * on (check_id, instance_id) group_left (entry_name)
+    synthetic_check_info
+
+# Mean / median / p10 over 24 hours. Grafana unit: Mbit/s.
+avg_over_time(synthetic_check_download_mbps[24h])
+quantile_over_time(0.50, synthetic_check_download_mbps[24h])
+quantile_over_time(0.10, synthetic_check_download_mbps[24h])
+
+# Measurement age; alerting or dashboards must not treat an old value as fresh.
+time() - synthetic_check_download_last_run_timestamp_seconds
+```
+
+Use `entry_name`, `instance_id`, and `target_id` as dashboard dimensions. A
+download target is excluded from `synthetic_check_target_*` and quorum by
+design, so a slow controlled origin cannot turn a reachability check into a VPN
+outage. Compare at least two controlled origins before attributing a regression
+to the inbound or its egress path.
+
+A ready importable dashboard with these filters and last/mean/median/p10 panels
+is in [`../grafana/inbound-throughput.json`](../grafana/inbound-throughput.json).
+
 Validate locally with the same pinned Prometheus image used by CI:
 
 ```console

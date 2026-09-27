@@ -267,6 +267,13 @@ class BodyMatcher(StrictModel):
         return self
 
 
+class ThroughputConfig(StrictModel):
+    """Bounded, low-frequency download measurement for one HTTP target."""
+
+    expected_bytes: int = Field(ge=64 * 1024, le=64 * 1024 * 1024)
+    interval: float = Field(default=30 * 60, ge=60, le=24 * 60 * 60)
+
+
 class TargetConfig(StrictModel):
     target_id: str
     name: str
@@ -275,6 +282,7 @@ class TargetConfig(StrictModel):
     expected_statuses: set[int] = Field(default_factory=lambda: {200}, min_length=1)
     timeout: float | None = Field(default=None, gt=0)
     body: BodyMatcher | None = None
+    throughput: ThroughputConfig | None = None
     max_body_bytes: int = Field(default=64 * 1024, ge=1, le=16 * 1024 * 1024)
     follow_redirects: bool = False
     max_redirects: int = Field(default=0, ge=0, le=20)
@@ -328,6 +336,8 @@ class TargetConfig(StrictModel):
 
     @model_validator(mode="after")
     def valid_redirect_policy(self) -> "TargetConfig":
+        if self.throughput is not None and self.body is not None:
+            raise ValueError("throughput targets cannot define a body matcher")
         if not self.follow_redirects and self.max_redirects:
             raise ValueError("max_redirects requires follow_redirects=true")
         if self.follow_redirects and self.max_redirects == 0:
@@ -368,9 +378,15 @@ class TargetSetConfig(StrictModel):
         ids = [target.target_id for target in self.targets]
         if len(ids) != len(set(ids)):
             raise ValueError("target IDs must be unique within a target set")
-        enabled_count = sum(target.enabled for target in self.targets)
+        # Throughput targets are diagnostic measurements. Their cached, lower-
+        # frequency state must never satisfy or fail the reachability quorum.
+        enabled_count = sum(
+            target.enabled and target.throughput is None for target in self.targets
+        )
         if self.quorum > enabled_count:
-            raise ValueError("quorum cannot exceed the number of enabled targets")
+            raise ValueError(
+                "quorum cannot exceed the number of enabled reachability targets"
+            )
         return self
 
 
@@ -494,6 +510,7 @@ class SchedulerConfig(StrictModel):
     observatory_warmup_timeout: float = Field(default=30.0, gt=0, le=300)
     max_active_runtimes: int = Field(default=8, ge=1)
     max_parallel_requests: int = Field(default=32, ge=1)
+    max_parallel_throughput_requests: int = Field(default=1, ge=1, le=8)
     max_queue_size: int = Field(default=1024, ge=1)
     max_result_age: float = Field(default=180.0, gt=0)
 
@@ -625,6 +642,15 @@ class AppConfig(StrictModel):
                 raise ValueError("assignment references an unknown target set")
             if not set(assignment.egress_assertion_ids) <= known_assertions:
                 raise ValueError("assignment references an unknown egress assertion")
+        for target_set in self.target_sets:
+            for target in target_set.targets:
+                if target.throughput is None or not target.enabled:
+                    continue
+                timeout = target.timeout or self.scheduler.request_timeout
+                if timeout >= self.scheduler.interval:
+                    raise ValueError(
+                        "throughput target timeout must be less than scheduler interval"
+                    )
         return self
 
 
@@ -823,6 +849,9 @@ class TargetResult(StrictModel):
     duration_seconds: float | None = Field(default=None, ge=0)
     ttfb_seconds: float | None = Field(default=None, ge=0)
     bytes_read: int | None = Field(default=None, ge=0)
+    transfer_seconds: float | None = Field(default=None, gt=0)
+    throughput_mbps: float | None = Field(default=None, ge=0)
+    measurement_timestamp: datetime | None = None
     error: str | None = Field(default=None, max_length=240)
 
     @model_validator(mode="before")
@@ -1024,6 +1053,7 @@ __all__ = [
     "TargetSet",
     "TargetSetConfig",
     "TargetState",
+    "ThroughputConfig",
     "clean_display_name",
     "utc_now",
 ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import ipaddress
 import json
 import os
@@ -42,6 +43,7 @@ class _ResponseData:
     bytes_read: int
     duration_seconds: float
     ttfb_seconds: float | None
+    transfer_seconds: float | None
     encoding: str | None
     redirect_count: int
 
@@ -56,6 +58,10 @@ class _InvalidResponse(Exception):
 
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_MIN_THROUGHPUT_BYTES = 64 * 1024
+_MAX_THROUGHPUT_BYTES = 64 * 1024 * 1024
+_MIN_THROUGHPUT_INTERVAL = 60.0
+_MAX_THROUGHPUT_INTERVAL = 24 * 60 * 60.0
 
 
 @dataclass(slots=True)
@@ -240,6 +246,45 @@ def _body_limit(value: Any, default: int) -> int:
     return value
 
 
+def _throughput_settings(target: Any) -> tuple[int, float] | None:
+    value = _field(target, "throughput")
+    if value is None:
+        return None
+    expected_bytes = _field(value, "expected_bytes")
+    interval = _field(value, "interval", 30 * 60)
+    if (
+        isinstance(expected_bytes, bool)
+        or not isinstance(expected_bytes, int)
+        or not _MIN_THROUGHPUT_BYTES <= expected_bytes <= _MAX_THROUGHPUT_BYTES
+    ):
+        raise CheckerConfigurationError(
+            "throughput expected_bytes must be between 65536 and 67108864"
+        )
+    if (
+        isinstance(interval, bool)
+        or not isinstance(interval, (int, float))
+        or not _MIN_THROUGHPUT_INTERVAL <= float(interval) <= _MAX_THROUGHPUT_INTERVAL
+    ):
+        raise CheckerConfigurationError(
+            "throughput interval must be between 60 and 86400 seconds"
+        )
+    return expected_bytes, float(interval)
+
+
+def _measurement_time(result: Any) -> datetime | None:
+    value = _field(result, "measurement_timestamp")
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _statuses(target: Any) -> frozenset[int]:
     values = _field(target, "expected_statuses")
     if values is None:
@@ -398,12 +443,17 @@ def _validate_target(target: Any, default_timeout: float, default_body_limit: in
     _positive_timeout(
         _field(target, "timeout", _field(target, "timeout_seconds")), default_timeout
     )
+    throughput = _throughput_settings(target)
     _body_limit(_field(target, "max_body_bytes"), default_body_limit)
     follow = bool(_field(target, "follow_redirects", False))
     redirects = _redirect_limit(target)
     if redirects and not follow:
         raise CheckerConfigurationError("max_redirects requires redirects to be enabled")
-    _matcher(target)
+    matcher = _matcher(target)
+    if throughput is not None and matcher is not None:
+        raise CheckerConfigurationError(
+            "throughput targets cannot define a body matcher"
+        )
 
 
 def _exception_chain(exc: BaseException) -> list[BaseException]:
@@ -496,6 +546,7 @@ class Checker:
         *,
         request_timeout: float = 15.0,
         max_parallel_requests: int = 8,
+        max_parallel_throughput_requests: int = 1,
         default_body_limit: int = 64 * 1024,
         egress_body_limit: int = 4096,
         client_factory: Callable[..., Any] | None = None,
@@ -507,9 +558,21 @@ class Checker:
             or max_parallel_requests < 1
         ):
             raise CheckerConfigurationError("max_parallel_requests must be positive")
+        if (
+            isinstance(max_parallel_throughput_requests, bool)
+            or not isinstance(max_parallel_throughput_requests, int)
+            or not 1 <= max_parallel_throughput_requests <= 8
+        ):
+            raise CheckerConfigurationError(
+                "max_parallel_throughput_requests must be between 1 and 8"
+            )
         self.default_body_limit = _body_limit(default_body_limit, 64 * 1024)
         self.egress_body_limit = _body_limit(egress_body_limit, 4096)
         self._semaphore = asyncio.Semaphore(max_parallel_requests)
+        self._throughput_semaphore = asyncio.Semaphore(
+            max_parallel_throughput_requests
+        )
+        self._throughput_initial_due: dict[str, datetime] = {}
         self._client_factory = client_factory
 
     @staticmethod
@@ -555,6 +618,8 @@ class Checker:
         max_redirects: int,
         accepted_statuses: frozenset[int],
         read_body: bool,
+        retain_body: bool = True,
+        expected_body_bytes: int | None = None,
         observation: _TTFBObservation | None = None,
     ) -> _ResponseData:
         loop = asyncio.get_running_loop()
@@ -564,6 +629,7 @@ class Checker:
         bytes_read = 0
         current_url = url
         redirect_count = 0
+        transfer_seconds: float | None = None
 
         async def trace(event_name: str, _: Mapping[str, Any]) -> None:
             if event_name == "http11.receive_response_headers.started":
@@ -602,7 +668,15 @@ class Checker:
                     if status in accepted_statuses and read_body:
                         declared_length = response.headers.get("content-length")
                         if declared_length and declared_length.isdecimal():
-                            if int(declared_length) > body_limit:
+                            declared_bytes = int(declared_length)
+                            if (
+                                expected_body_bytes is not None
+                                and declared_bytes != expected_body_bytes
+                            ):
+                                raise _InvalidResponse(
+                                    "response length does not match throughput target"
+                                )
+                            if declared_bytes > body_limit:
                                 raise _BodyTooLarge(int(declared_length))
                         content_encoding = response.headers.get(
                             "content-encoding", "identity"
@@ -612,11 +686,25 @@ class Checker:
                             # compressed body instead of letting a decompression bomb
                             # bypass the decoded-byte limit inside HTTPX.
                             raise _InvalidResponse("unexpected content encoding")
-                        async for chunk in response.aiter_bytes(chunk_size=8192):
+                        transfer_started = loop.time()
+                        chunk_size = 8192 if retain_body else 64 * 1024
+                        async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                             bytes_read += len(chunk)
                             if bytes_read > body_limit:
                                 raise _BodyTooLarge(bytes_read)
-                            body.extend(chunk)
+                            if retain_body:
+                                body.extend(chunk)
+                        transfer_seconds = max(
+                            loop.time() - transfer_started,
+                            1e-9,
+                        )
+                        if (
+                            expected_body_bytes is not None
+                            and bytes_read != expected_body_bytes
+                        ):
+                            raise _InvalidResponse(
+                                "response length does not match throughput target"
+                            )
                     break
         finally:
             _ACTIVE_TTFB.reset(token)
@@ -626,6 +714,7 @@ class Checker:
             bytes_read=bytes_read,
             duration_seconds=loop.time() - started,
             ttfb_seconds=observation.elapsed,
+            transfer_seconds=transfer_seconds,
             encoding=encoding,
             redirect_count=redirect_count,
         )
@@ -637,45 +726,68 @@ class Checker:
         started = loop.time()
         request_started: float | None = None
         observation: _TTFBObservation | None = None
+        throughput: tuple[int, float] | None = None
         try:
             _validate_target(target, self.request_timeout, self.default_body_limit)
             target_id = _target_id(target)
             url = _absolute_http_url(_field(target, "url"), kind="target")
             statuses = _statuses(target)
             matcher = _matcher(target)
+            throughput = _throughput_settings(target)
             timeout = _positive_timeout(
                 _field(target, "timeout", _field(target, "timeout_seconds")),
                 self.request_timeout,
             )
-            max_body = _body_limit(
-                _field(target, "max_body_bytes"), self.default_body_limit
+            max_body = (
+                throughput[0]
+                if throughput is not None
+                else _body_limit(
+                    _field(target, "max_body_bytes"), self.default_body_limit
+                )
             )
             follow = bool(_field(target, "follow_redirects", False))
             max_redirects = _redirect_limit(target)
-            async with self._semaphore:
-                request_started = loop.time()
-                observation = _TTFBObservation(started=request_started, clock=loop.time)
-                matched: bool | None = None
-                # One deadline covers connect, every redirect, the bounded body
-                # stream, decoding, and exact/regex evaluation.
-                async with asyncio.timeout(timeout):
-                    response = await self._request(
-                        client,
-                        url=url,
-                        body_limit=max_body,
-                        follow_redirects=follow,
-                        max_redirects=max_redirects,
-                        accepted_statuses=statuses,
-                        read_body=matcher is not None,
-                        observation=observation,
+            throughput_acquired = False
+            try:
+                if throughput is not None:
+                    await self._throughput_semaphore.acquire()
+                    throughput_acquired = True
+                async with self._semaphore:
+                    request_started = loop.time()
+                    observation = _TTFBObservation(
+                        started=request_started, clock=loop.time
                     )
-                    if response.status_code in statuses and matcher is not None:
-                        matched = await _decode_and_match(
-                            response.body,
-                            response.encoding,
-                            matcher,
+                    matched: bool | None = None
+                    # One deadline covers connect, every redirect, the bounded
+                    # stream, and any body matcher evaluation.
+                    async with asyncio.timeout(timeout):
+                        response = await self._request(
+                            client,
+                            url=url,
+                            body_limit=max_body,
+                            follow_redirects=follow,
+                            max_redirects=max_redirects,
+                            accepted_statuses=statuses,
+                            read_body=matcher is not None or throughput is not None,
+                            retain_body=matcher is not None,
+                            expected_body_bytes=(
+                                throughput[0] if throughput is not None else None
+                            ),
+                            observation=observation,
                         )
-                duration = loop.time() - request_started
+                        if response.status_code in statuses and matcher is not None:
+                            matched = await _decode_and_match(
+                                response.body,
+                                response.encoding,
+                                matcher,
+                            )
+                    duration = loop.time() - request_started
+            finally:
+                if throughput_acquired:
+                    self._throughput_semaphore.release()
+            measured_at = (
+                datetime.now(timezone.utc) if throughput is not None else None
+            )
             if response.status_code not in statuses:
                 return TargetResult(
                     target_id=target_id,
@@ -685,6 +797,8 @@ class Checker:
                     duration_seconds=duration,
                     ttfb_seconds=response.ttfb_seconds,
                     bytes_read=response.bytes_read,
+                    transfer_seconds=response.transfer_seconds,
+                    measurement_timestamp=measured_at,
                     error="unexpected HTTP status",
                 )
             if matcher is not None:
@@ -700,6 +814,13 @@ class Checker:
                         bytes_read=response.bytes_read,
                         error="response body did not match",
                     )
+            throughput_mbps: float | None = None
+            if throughput is not None:
+                if response.transfer_seconds is None or response.transfer_seconds <= 0:
+                    raise _InvalidResponse("throughput transfer duration is unavailable")
+                throughput_mbps = (
+                    response.bytes_read * 8 / response.transfer_seconds / 1_000_000
+                )
             return TargetResult(
                 target_id=target_id,
                 state=ReachabilityState.SUCCESS,
@@ -707,6 +828,9 @@ class Checker:
                 duration_seconds=duration,
                 ttfb_seconds=response.ttfb_seconds,
                 bytes_read=response.bytes_read,
+                transfer_seconds=response.transfer_seconds,
+                throughput_mbps=throughput_mbps,
+                measurement_timestamp=measured_at,
             )
         except asyncio.CancelledError:
             raise
@@ -715,7 +839,7 @@ class Checker:
                 target_id = _target_id(target)
             except CheckerConfigurationError:
                 target_id = "invalid-target"
-            return _target_error_result(
+            result = _target_error_result(
                 target_id,
                 exc,
                 duration=max(
@@ -725,6 +849,11 @@ class Checker:
                 ),
                 ttfb_seconds=observation.elapsed if observation is not None else None,
             )
+            if throughput is not None:
+                result = result.model_copy(
+                    update={"measurement_timestamp": datetime.now(timezone.utc)}
+                )
+            return result
 
     async def check_egress(
         self, client: httpx.AsyncClient, assertion: Any
@@ -831,19 +960,25 @@ class Checker:
         *,
         socks_host: str = "127.0.0.1",
         egress_assertions: Sequence[Any] = (),
+        previous_target_results: Sequence[Any] = (),
+        throughput_schedule_key: str | None = None,
+        force_throughput: bool = False,
     ) -> tuple[ReachabilityResult, list[EgressResult]]:
-        """Run every enabled target and egress assertion in one isolated cycle."""
+        """Run health targets and any due throughput measurements in one cycle."""
 
         targets_raw = _field(target_set, "targets")
         if not isinstance(targets_raw, Sequence) or isinstance(targets_raw, (str, bytes)):
             raise CheckerConfigurationError("target set targets must be a list")
         targets = [item for item in targets_raw if bool(_field(item, "enabled", True))]
+        health_targets = [
+            item for item in targets if _throughput_settings(item) is None
+        ]
         quorum = _field(target_set, "quorum")
         if (
             isinstance(quorum, bool)
             or not isinstance(quorum, int)
             or quorum < 1
-            or quorum > len(targets)
+            or quorum > len(health_targets)
         ):
             raise CheckerConfigurationError("target set quorum is invalid")
         if not bool(_field(target_set, "enabled", True)):
@@ -862,12 +997,73 @@ class Checker:
                     for item in egress_assertions
                 ],
             )
+        previous_by_id: dict[str, TargetResult] = {}
+        for value in previous_target_results:
+            try:
+                parsed = (
+                    value
+                    if isinstance(value, TargetResult)
+                    else TargetResult.model_validate(value)
+                )
+            except (TypeError, ValueError):
+                continue
+            previous_by_id[parsed.target_id] = parsed
+
+        now = datetime.now(timezone.utc)
+        cached_results: dict[str, TargetResult] = {}
+        targets_to_run: list[Any] = []
+        for target in targets:
+            target_id = _target_id(target)
+            throughput = _throughput_settings(target)
+            previous = previous_by_id.get(target_id)
+            measured_at = _measurement_time(previous) if previous is not None else None
+            if (
+                throughput is not None
+                and not force_throughput
+                and previous is not None
+                and measured_at is not None
+            ):
+                age = (now - measured_at).total_seconds()
+                if 0 <= age < throughput[1]:
+                    cached_results[target_id] = previous
+                    continue
+            if (
+                throughput is not None
+                and not force_throughput
+                and measured_at is None
+                and throughput_schedule_key is not None
+            ):
+                schedule_id = f"{throughput_schedule_key}\0{target_id}"
+                due_at = self._throughput_initial_due.get(schedule_id)
+                if due_at is None:
+                    digest = hashlib.sha256(schedule_id.encode("utf-8")).digest()
+                    fraction = int.from_bytes(digest[:8], "big") / 2**64
+                    interval = throughput[1]
+                    offset = fraction * interval
+                    due_timestamp = (
+                        ((now.timestamp() - offset) // interval + 1) * interval
+                        + offset
+                    )
+                    due_at = datetime.fromtimestamp(
+                        due_timestamp,
+                        tz=timezone.utc,
+                    )
+                    self._throughput_initial_due[schedule_id] = due_at
+                if now < due_at:
+                    cached_results[target_id] = TargetResult(
+                        target_id=target_id,
+                        state=ReachabilityState.UNKNOWN,
+                    )
+                    continue
+                self._throughput_initial_due.pop(schedule_id, None)
+            targets_to_run.append(target)
+
         proxy_url = self._proxy_url(socks_host, socks_port)
         try:
             client_context = self._make_client(proxy_url)
             async with client_context as client:
-                target_results = await asyncio.gather(
-                    *(self.check_target(client, target) for target in targets)
+                fresh_results = await asyncio.gather(
+                    *(self.check_target(client, target) for target in targets_to_run)
                 )
                 # Egress stays independent from quorum but uses the exact same
                 # runtime and routing mode as the reachability requests.
@@ -877,9 +1073,15 @@ class Checker:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
-            target_results = [
-                _target_error_result(_target_id(target), exc) for target in targets
-            ]
+            fresh_results = []
+            failed_at = datetime.now(timezone.utc)
+            for target in targets_to_run:
+                result = _target_error_result(_target_id(target), exc)
+                if _throughput_settings(target) is not None:
+                    result = result.model_copy(
+                        update={"measurement_timestamp": failed_at}
+                    )
+                fresh_results.append(result)
             reason, safe_error = _classify_exception(exc)
             egress_results = [
                 EgressResult(
@@ -890,10 +1092,22 @@ class Checker:
                 )
                 for item in egress_assertions
             ]
-        success_count = sum(item.state is ReachabilityState.SUCCESS for item in target_results)
+        fresh_by_id = {item.target_id: item for item in fresh_results}
+        target_results = [
+            cached_results.get(_target_id(target))
+            or fresh_by_id[_target_id(target)]
+            for target in targets
+        ]
+        health_ids = {_target_id(target) for target in health_targets}
+        health_results = [
+            item for item in target_results if item.target_id in health_ids
+        ]
+        success_count = sum(
+            item.state is ReachabilityState.SUCCESS for item in health_results
+        )
         if success_count >= quorum:
             state = ReachabilityState.SUCCESS
-        elif any(item.state is ReachabilityState.ERROR for item in target_results):
+        elif any(item.state is ReachabilityState.ERROR for item in health_results):
             state = ReachabilityState.ERROR
         else:
             state = ReachabilityState.FAILURE
@@ -915,6 +1129,9 @@ class Checker:
         *,
         socks_host: str = "127.0.0.1",
         egress_assertions: Sequence[Any] = (),
+        previous_target_results: Sequence[Any] = (),
+        throughput_schedule_key: str | None = None,
+        force_throughput: bool = False,
     ) -> CycleResult:
         started = datetime.now(timezone.utc)
         reachability, egress = await self.check_target_set(
@@ -922,6 +1139,9 @@ class Checker:
             socks_port,
             socks_host=socks_host,
             egress_assertions=egress_assertions,
+            previous_target_results=previous_target_results,
+            throughput_schedule_key=throughput_schedule_key,
+            force_throughput=force_throughput,
         )
         return CycleResult(
             check_id=str(_field(check, "check_id")),
@@ -939,20 +1159,28 @@ async def check_target_set(
     *,
     socks_host: str = "127.0.0.1",
     egress_assertions: Sequence[Any] = (),
+    previous_target_results: Sequence[Any] = (),
+    throughput_schedule_key: str | None = None,
+    force_throughput: bool = False,
     request_timeout: float = 15.0,
     max_parallel_requests: int = 8,
+    max_parallel_throughput_requests: int = 1,
 ) -> tuple[ReachabilityResult, list[EgressResult]]:
     """Convenience wrapper for callers that do not retain a Checker instance."""
 
     checker = Checker(
         request_timeout=request_timeout,
         max_parallel_requests=max_parallel_requests,
+        max_parallel_throughput_requests=max_parallel_throughput_requests,
     )
     return await checker.check_target_set(
         target_set,
         socks_port,
         socks_host=socks_host,
         egress_assertions=egress_assertions,
+        previous_target_results=previous_target_results,
+        throughput_schedule_key=throughput_schedule_key,
+        force_throughput=force_throughput,
     )
 
 

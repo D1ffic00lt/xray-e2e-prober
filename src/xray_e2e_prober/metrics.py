@@ -66,6 +66,36 @@ class CurrentStateCollector:
             "Observed time to first response byte",
             labels=["check_id", "instance_id", "target_id"],
         )
+        download_state = GaugeMetricFamily(
+            "synthetic_check_download_state",
+            "One-hot current state of a bounded throughput measurement",
+            labels=["check_id", "instance_id", "target_id", "state"],
+        )
+        download_success = GaugeMetricFamily(
+            "synthetic_check_download_success",
+            "One for a complete throughput download and zero for confirmed failure",
+            labels=["check_id", "instance_id", "target_id"],
+        )
+        download_bytes = GaugeMetricFamily(
+            "synthetic_check_download_bytes",
+            "Bytes read by the last bounded throughput measurement",
+            labels=["check_id", "instance_id", "target_id"],
+        )
+        download_transfer = GaugeMetricFamily(
+            "synthetic_check_download_transfer_seconds",
+            "Body transfer duration of the last bounded throughput measurement",
+            labels=["check_id", "instance_id", "target_id"],
+        )
+        download_mbps = GaugeMetricFamily(
+            "synthetic_check_download_mbps",
+            "Measured download throughput in decimal megabits per second",
+            labels=["check_id", "instance_id", "target_id"],
+        )
+        download_timestamp = GaugeMetricFamily(
+            "synthetic_check_download_last_run_timestamp_seconds",
+            "Completion time of the last throughput measurement",
+            labels=["check_id", "instance_id", "target_id"],
+        )
         last_run = GaugeMetricFamily(
             "synthetic_check_last_run_timestamp_seconds",
             "Completion time for the current generation",
@@ -112,6 +142,35 @@ class CurrentStateCollector:
                 target_id = str(target["target_id"])
                 target_labels = labels + [target_id]
                 current_target_state = str(target.get("state", "unknown"))
+                if target.get("kind", "reachability") == "throughput":
+                    for possible in TARGET_STATES:
+                        download_state.add_metric(
+                            target_labels + [possible],
+                            float(current_target_state == possible),
+                        )
+                    if current_target_state in {"success", "failure"}:
+                        download_success.add_metric(
+                            target_labels,
+                            float(current_target_state == "success"),
+                        )
+                    if target.get("bytes_read") is not None:
+                        download_bytes.add_metric(
+                            target_labels, float(target["bytes_read"])
+                        )
+                    if target.get("transfer_seconds") is not None:
+                        download_transfer.add_metric(
+                            target_labels, float(target["transfer_seconds"])
+                        )
+                    if target.get("throughput_mbps") is not None:
+                        download_mbps.add_metric(
+                            target_labels, float(target["throughput_mbps"])
+                        )
+                    if target.get("measurement_timestamp") is not None:
+                        download_timestamp.add_metric(
+                            target_labels,
+                            float(target["measurement_timestamp"]),
+                        )
+                    continue
                 for possible in TARGET_STATES:
                     target_state.add_metric(
                         target_labels + [possible], float(current_target_state == possible)
@@ -187,6 +246,12 @@ class CurrentStateCollector:
             target_state,
             duration,
             ttfb,
+            download_state,
+            download_success,
+            download_bytes,
+            download_transfer,
+            download_mbps,
+            download_timestamp,
             last_run,
             egress_state,
             egress_match,

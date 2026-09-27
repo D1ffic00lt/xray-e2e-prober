@@ -244,6 +244,236 @@ async def test_streaming_limit_and_whole_request_deadline() -> None:
 
 
 @pytest.mark.asyncio
+async def test_throughput_download_is_bounded_cached_and_excluded_from_quorum() -> None:
+    throughput_body = b"x" * (64 * 1024)
+    visits: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        visits.append(request.url.host)
+        if request.url.host == "download.test":
+            stream = _DelayedStream(
+                [(0.001, throughput_body[:32768]), (0.001, throughput_body[32768:])]
+            )
+            return httpx.Response(
+                200,
+                headers={"content-length": str(len(throughput_body))},
+                stream=stream,
+                request=request,
+            )
+        return httpx.Response(204, request=request)
+
+    target_set = TargetSetConfig(
+        target_set_id="throughput",
+        name="throughput",
+        quorum=1,
+        targets=[
+            TargetConfig(
+                target_id="health",
+                name="health",
+                url="https://health.test/",
+                expected_statuses={204},
+            ),
+            TargetConfig(
+                target_id="download",
+                name="download",
+                url="https://download.test/object.bin",
+                timeout=5,
+                throughput={"expected_bytes": len(throughput_body), "interval": 1800},
+            ),
+        ],
+    )
+    checker = Checker(client_factory=_factory(handler))
+
+    first, _ = await checker.check_target_set(target_set, 18082)
+    download = next(item for item in first.targets if item.target_id == "download")
+
+    assert first.state is ReachabilityState.SUCCESS
+    assert first.success_count == 1
+    assert download.state is ReachabilityState.SUCCESS
+    assert download.bytes_read == len(throughput_body)
+    assert download.transfer_seconds is not None
+    assert download.transfer_seconds > 0
+    assert download.throughput_mbps is not None
+    assert download.throughput_mbps > 0
+    assert download.measurement_timestamp is not None
+
+    second, _ = await checker.check_target_set(
+        target_set,
+        18082,
+        previous_target_results=first.targets,
+    )
+
+    assert second.success_count == 1
+    assert visits.count("health.test") == 2
+    assert visits.count("download.test") == 1
+    assert next(
+        item for item in second.targets if item.target_id == "download"
+    ) == download
+
+
+@pytest.mark.asyncio
+async def test_throughput_download_rejects_wrong_content_length_without_failing_health() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "download.test":
+            return httpx.Response(
+                200,
+                content=b"short",
+                headers={"content-length": "5"},
+                request=request,
+            )
+        return httpx.Response(204, request=request)
+
+    checker = Checker(client_factory=_factory(handler))
+    reachability, _ = await checker.check_target_set(
+        {
+            "quorum": 1,
+            "targets": [
+                {
+                    "target_id": "health",
+                    "url": "https://health.test/",
+                    "expected_statuses": [204],
+                },
+                {
+                    "target_id": "download",
+                    "url": "https://download.test/object.bin",
+                    "throughput": {"expected_bytes": 65536, "interval": 1800},
+                },
+            ],
+        },
+        18082,
+    )
+
+    by_id = {item.target_id: item for item in reachability.targets}
+    assert reachability.state is ReachabilityState.SUCCESS
+    assert reachability.success_count == 1
+    assert by_id["download"].state is ReachabilityState.FAILURE
+    assert by_id["download"].reason is Reason.RESPONSE_INVALID
+    assert by_id["download"].measurement_timestamp is not None
+
+
+@pytest.mark.asyncio
+async def test_throughput_downloads_use_their_separate_concurrency_limit() -> None:
+    body = b"x" * (64 * 1024)
+    counters = {"active": 0, "maximum": 0}
+
+    class TrackingStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            counters["active"] += 1
+            counters["maximum"] = max(counters["maximum"], counters["active"])
+            try:
+                await asyncio.sleep(0.01)
+                yield body
+            finally:
+                counters["active"] -= 1
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "health.test":
+            return httpx.Response(204, request=request)
+        return httpx.Response(
+            200,
+            headers={"content-length": str(len(body))},
+            stream=TrackingStream(),
+            request=request,
+        )
+
+    reachability, _ = await Checker(
+        max_parallel_requests=8,
+        max_parallel_throughput_requests=1,
+        client_factory=_factory(handler),
+    ).check_target_set(
+        {
+            "quorum": 1,
+            "targets": [
+                {
+                    "target_id": "health",
+                    "url": "https://health.test/",
+                    "expected_statuses": [204],
+                },
+                {
+                    "target_id": "download-one",
+                    "url": "https://one.test/object.bin",
+                    "throughput": {"expected_bytes": len(body)},
+                },
+                {
+                    "target_id": "download-two",
+                    "url": "https://two.test/object.bin",
+                    "throughput": {"expected_bytes": len(body)},
+                },
+            ],
+        },
+        18082,
+    )
+
+    assert reachability.state is ReachabilityState.SUCCESS
+    assert counters["maximum"] == 1
+
+
+@pytest.mark.asyncio
+async def test_initial_throughput_measurement_is_jittered_but_can_be_forced() -> None:
+    body = b"x" * (64 * 1024)
+    visits: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        visits.append(request.url.host)
+        if request.url.host == "health.test":
+            return httpx.Response(204, request=request)
+        return httpx.Response(200, content=body, request=request)
+
+    target_set = {
+        "quorum": 1,
+        "targets": [
+            {
+                "target_id": "health",
+                "url": "https://health.test/",
+                "expected_statuses": [204],
+            },
+            {
+                "target_id": "download",
+                "url": "https://download.test/object.bin",
+                "throughput": {"expected_bytes": len(body), "interval": 1800},
+            },
+        ],
+    }
+    checker = Checker(client_factory=_factory(handler))
+
+    scheduled, _ = await checker.check_target_set(
+        target_set,
+        18082,
+        throughput_schedule_key="check-one",
+    )
+    scheduled_download = next(
+        item for item in scheduled.targets if item.target_id == "download"
+    )
+
+    assert scheduled_download.state is ReachabilityState.UNKNOWN
+    assert visits == ["health.test"]
+
+    still_scheduled, _ = await checker.check_target_set(
+        target_set,
+        18082,
+        previous_target_results=scheduled.targets,
+        throughput_schedule_key="check-one",
+    )
+    assert next(
+        item for item in still_scheduled.targets if item.target_id == "download"
+    ).state is ReachabilityState.UNKNOWN
+    assert visits == ["health.test", "health.test"]
+
+    forced, _ = await checker.check_target_set(
+        target_set,
+        18082,
+        throughput_schedule_key="check-one",
+        force_throughput=True,
+    )
+
+    forced_download = next(
+        item for item in forced.targets if item.target_id == "download"
+    )
+    assert forced_download.state is ReachabilityState.SUCCESS
+    assert visits.count("download.test") == 1
+
+
+@pytest.mark.asyncio
 async def test_redirect_limit_is_per_target() -> None:
     visited: dict[str, list[int]] = {"short.test": [], "long.test": []}
 

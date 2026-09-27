@@ -91,6 +91,21 @@ target_sets:
         follow_redirects: false
         max_redirects: 0
         enabled: true
+      # Diagnostic download measurement. Replace the .invalid URL with a
+      # controlled, fixed-size, incompressible HTTPS object before enabling.
+      # It is cached for its own interval and never contributes to quorum.
+      - target_id: controlled-download
+        name: Controlled 8 MiB object
+        url: https://download.example.invalid/object-8m.bin
+        method: GET
+        expected_statuses: [200]
+        timeout: 30
+        throughput:
+          expected_bytes: 8388608
+          interval: 1800
+        follow_redirects: false
+        max_redirects: 0
+        enabled: false
 
 # This assertion is intentionally disabled: documentation/example CIDRs must
 # never be interpreted as a real routing expectation.
@@ -140,6 +155,8 @@ scheduler:
   observatory_warmup_timeout: 30
   max_active_runtimes: 8
   max_parallel_requests: 32
+  # Throughput downloads are separately serialized by default.
+  max_parallel_throughput_requests: 1
   max_queue_size: 1024
   max_result_age: 180
 

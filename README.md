@@ -5,7 +5,11 @@ Prober импортирует VLESS-подписки или полные JSON-п
 запросы через локальный SOCKS-вход Xray и публикует безопасные результаты через
 CLI, read-only HTTP API и Prometheus-метрики.
 
-> Статус: ранний MVP `0.1.1`. Помимо локальных SOCKS/HTTP fixtures и subprocess
+Опциональные throughput-targets выполняют ограниченное потоковое скачивание
+через каждый проверяемый профиль, не сохраняют тело в памяти и публикуют Mbps,
+объём, время передачи и возраст замера отдельно от reachability/quorum.
+
+> Статус: ранний MVP `0.2.0`. Помимо локальных SOCKS/HTTP fixtures и subprocess
 > lifecycle scenarios, opt-in Docker integration suite запускает закреплённый
 > Xray Core `26.3.27` в локальной client/server matrix: VLESS RAW и XHTTP с TLS
 > и REALITY, включая негативные проверки UUID и REALITY key. Точные границы
@@ -22,7 +26,7 @@ egress assertion с ожидаемыми CIDR.
 ## Быстрый запуск в Docker
 
 Требуются Docker Engine и Docker Compose v2. Из исходников собирается фиксированный
-локальный тег `xray-e2e-prober:0.1.1`; в образ входят CPython 3.13.12 и Xray Core
+локальный тег `xray-e2e-prober:0.2.0`; в образ входят CPython 3.13.12 и Xray Core
 26.3.27. Во время старта пакеты не скачиваются.
 
 ```console
@@ -41,7 +45,7 @@ SOCKS-порты Xray и управляющий Unix socket наружу не п
 `latest`:
 
 ```console
-export PROBER_IMAGE='ghcr.io/REPLACE_OWNER/xray-e2e-prober:0.1.1@sha256:REPLACE_DIGEST'
+export PROBER_IMAGE='ghcr.io/REPLACE_OWNER/xray-e2e-prober:0.2.0@sha256:REPLACE_DIGEST'
 docker compose pull prober
 docker compose up -d prober
 ```
@@ -116,6 +120,8 @@ Readiness не зависит от доступности проверяемых
 - [Неинтерактивный пример](examples/config.example.yaml).
 - [Recording/alert rules](examples/prometheus/README.md) — необязательная
   интеграция; Prometheus не нужен для работы сервиса.
+- [Grafana dashboard](examples/grafana/inbound-throughput.json) — last,
+  mean, median, p10 и возраст throughput-замеров по inbound/observer/target.
 
 ## Не входит в MVP
 

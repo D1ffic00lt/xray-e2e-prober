@@ -1,0 +1,507 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Bounded synthetic download throughput through Xray profiles. Throughput targets are diagnostic and do not affect reachability quorum.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$server"
+      },
+      "description": "Last completed bounded download. Use the measurement-age panel before treating this value as current.",
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "Mbits"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 18,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$server"
+          },
+          "editorMode": "code",
+          "expr": "synthetic_check_download_mbps{instance_id=~\"$instance_id\",target_id=~\"$target_id\"} * on(check_id,instance_id) group_left(entry_name) synthetic_check_info{entry_name=~\"$entry_name\"}",
+          "instant": true,
+          "legendFormat": "{{entry_name}} · {{instance_id}} · {{target_id}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Last throughput",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$server"
+      },
+      "description": "Number of selected throughput measurements currently in failure, error, or stale state. Initial jittered measurements remain unknown and are not counted.",
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$server"
+          },
+          "editorMode": "code",
+          "expr": "sum((synthetic_check_download_state{instance_id=~\"$instance_id\",target_id=~\"$target_id\",state=~\"failure|error|stale\"} == 1) and on(check_id,instance_id) synthetic_check_info{entry_name=~\"$entry_name\"}) or vector(0)",
+          "instant": true,
+          "legendFormat": "Problems",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Problem measurements",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$server"
+      },
+      "description": "Raw scheduled download measurements. Values are held between runs; points change only when the target interval elapses.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "decimals": 1,
+          "min": 0,
+          "unit": "Mbits"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "min"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$server"
+          },
+          "editorMode": "code",
+          "expr": "synthetic_check_download_mbps{instance_id=~\"$instance_id\",target_id=~\"$target_id\"} * on(check_id,instance_id) group_left(entry_name) synthetic_check_info{entry_name=~\"$entry_name\"}",
+          "instant": false,
+          "legendFormat": "{{entry_name}} · {{instance_id}} · {{target_id}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Measured throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$server"
+      },
+      "description": "Mean, median, and lower-decile throughput over the selected baseline window. p10 is useful for seeing recurring slow periods hidden by the mean.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "decimals": 1,
+          "min": 0,
+          "unit": "Mbits"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 18,
+        "x": 0,
+        "y": 15
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$server"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time(synthetic_check_download_mbps{instance_id=~\"$instance_id\",target_id=~\"$target_id\"}[$baseline_window]) * on(check_id,instance_id) group_left(entry_name) synthetic_check_info{entry_name=~\"$entry_name\"}",
+          "instant": false,
+          "legendFormat": "mean · {{entry_name}} · {{instance_id}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$server"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.50, synthetic_check_download_mbps{instance_id=~\"$instance_id\",target_id=~\"$target_id\"}[$baseline_window]) * on(check_id,instance_id) group_left(entry_name) synthetic_check_info{entry_name=~\"$entry_name\"}",
+          "instant": false,
+          "legendFormat": "median · {{entry_name}} · {{instance_id}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$server"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.10, synthetic_check_download_mbps{instance_id=~\"$instance_id\",target_id=~\"$target_id\"}[$baseline_window]) * on(check_id,instance_id) group_left(entry_name) synthetic_check_info{entry_name=~\"$entry_name\"}",
+          "instant": false,
+          "legendFormat": "p10 · {{entry_name}} · {{instance_id}}",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Baseline summary",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$server"
+      },
+      "description": "Minutes since the last actual download. This differs from the regular check age because throughput results are intentionally cached between measurements.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "decimals": 1,
+          "min": 0,
+          "unit": "m"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 6,
+        "x": 18,
+        "y": 15
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$server"
+          },
+          "editorMode": "code",
+          "expr": "(time() - synthetic_check_download_last_run_timestamp_seconds{instance_id=~\"$instance_id\",target_id=~\"$target_id\"}) / 60 * on(check_id,instance_id) group_left(entry_name) synthetic_check_info{entry_name=~\"$entry_name\"}",
+          "instant": false,
+          "legendFormat": "{{entry_name}} · {{instance_id}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Measurement age",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 41,
+  "tags": [
+    "vpn",
+    "xray",
+    "throughput"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "definition": "prometheus",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Server",
+        "multi": false,
+        "name": "server",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "/^Prometheus (RU2|NL2|DE2)$/",
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$server"
+        },
+        "definition": "label_values(synthetic_check_download_state, instance_id)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Observer",
+        "multi": true,
+        "name": "instance_id",
+        "options": [],
+        "query": {
+          "query": "label_values(synthetic_check_download_state, instance_id)",
+          "refId": "var-instance_id"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$server"
+        },
+        "definition": "label_values(synthetic_check_info{instance_id=~\"$instance_id\",entry_name!=\"\"}, entry_name)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Inbound",
+        "multi": true,
+        "name": "entry_name",
+        "options": [],
+        "query": {
+          "query": "label_values(synthetic_check_info{instance_id=~\"$instance_id\",entry_name!=\"\"}, entry_name)",
+          "refId": "var-entry_name"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$server"
+        },
+        "definition": "label_values(synthetic_check_download_state{instance_id=~\"$instance_id\"}, target_id)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Download target",
+        "multi": true,
+        "name": "target_id",
+        "options": [],
+        "query": {
+          "query": "label_values(synthetic_check_download_state{instance_id=~\"$instance_id\"}, target_id)",
+          "refId": "var-target_id"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "24h",
+          "value": "24h"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Baseline window",
+        "multi": false,
+        "name": "baseline_window",
+        "options": [
+          {
+            "selected": false,
+            "text": "6h",
+            "value": "6h"
+          },
+          {
+            "selected": true,
+            "text": "24h",
+            "value": "24h"
+          },
+          {
+            "selected": false,
+            "text": "7d",
+            "value": "7d"
+          }
+        ],
+        "query": "6h,24h,7d",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "VPN Inbound Throughput",
+  "uid": "vpn-inbound-throughput",
+  "version": 1,
+  "weekStart": ""
+}

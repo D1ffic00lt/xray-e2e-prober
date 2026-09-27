@@ -738,6 +738,10 @@ def _configuration_summary(config: AppConfig, draft: SourceDraft) -> None:
     typer.echo(f"  request timeout: {config.scheduler.request_timeout}s")
     typer.echo(f"  active runtimes: {config.scheduler.max_active_runtimes}")
     typer.echo(f"  parallel requests: {config.scheduler.max_parallel_requests}")
+    typer.echo(
+        "  parallel throughput downloads: "
+        f"{config.scheduler.max_parallel_throughput_requests}"
+    )
     typer.echo(f"  egress assertions: {len(config.egress_assertions)}")
     typer.echo("  default modes: VLESS URI=connection, full JSON=profile")
 

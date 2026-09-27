@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -49,6 +50,10 @@ from .sources import SourceFetchError, SourceLoader
 from .storage import DataStore, FileLock, StorageError
 
 logger = logging.getLogger(__name__)
+_FORCE_THROUGHPUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "xray_e2e_prober_force_throughput",
+    default=False,
+)
 
 
 class ServiceError(RuntimeError):
@@ -492,6 +497,9 @@ class ProberService:
         checker = Checker(
             request_timeout=config.scheduler.request_timeout,
             max_parallel_requests=config.scheduler.max_parallel_requests,
+            max_parallel_throughput_requests=(
+                config.scheduler.max_parallel_throughput_requests
+            ),
         )
         scheduler = Scheduler(
             self._execute_scheduled,
@@ -1234,7 +1242,15 @@ class ProberService:
         check = self.inventory.get(scheduled.check_id)
         if check is None or check.definition.generation != str(scheduled.generation):
             raise ServiceError("scheduled check belongs to an obsolete generation")
-        return await self.execute(check)
+        force_throughput = bool(
+            isinstance(scheduled.payload, dict)
+            and scheduled.payload.get("force_throughput") is True
+        )
+        token = _FORCE_THROUGHPUT.set(force_throughput)
+        try:
+            return await self.execute(check)
+        finally:
+            _FORCE_THROUGHPUT.reset(token)
 
     async def execute(self, check: CompiledCheck) -> RunResult:
         if self.config is None or self._pool is None or self._checker is None:
@@ -1244,6 +1260,14 @@ class ProberService:
         run_id = new_run_id()
         instance_id = self.config.instance_id
         config_revision = _config_revision(self.config)
+        previous = self.results.get(definition.check_id)
+        previous_target_results = (
+            previous.target_results
+            if previous is not None
+            and previous.generation == definition.generation
+            and previous.config_revision == config_revision
+            else []
+        )
         try:
             async with self._pool.acquire(check) as runtime:
                 cycle = await self._checker.run_cycle(
@@ -1252,6 +1276,9 @@ class ProberService:
                     runtime.socks_port,
                     socks_host=runtime.socks_host,
                     egress_assertions=check.egress_assertions,
+                    previous_target_results=previous_target_results,
+                    throughput_schedule_key=definition.check_id,
+                    force_throughput=_FORCE_THROUGHPUT.get(),
                 )
             result = RunResult(
                 run_id=run_id,
@@ -1450,7 +1477,10 @@ class ProberService:
             interval_seconds=(
                 self.config.scheduler.interval if self.config is not None else 1.0
             ),
-            payload=definition.check_id,
+            payload={
+                "check_id": definition.check_id,
+                "force_throughput": True,
+            },
         )
         try:
             return await self._scheduler.run_once(scheduled)
@@ -1544,6 +1574,9 @@ class ProberService:
             "targets": [
                 {
                     "target_id": item.target_id,
+                    "kind": (
+                        "throughput" if item.throughput is not None else "reachability"
+                    ),
                     "state": (
                         "unknown" if definition.enabled and item.enabled else "disabled"
                     ),
@@ -1594,6 +1627,11 @@ class ProberService:
             base["targets"] = [
                 {
                     "target_id": target.target_id,
+                    "kind": (
+                        "throughput"
+                        if target.throughput is not None
+                        else "reachability"
+                    ),
                     "state": "stale" if target.enabled else "disabled",
                 }
                 for target in check.target_set.targets
@@ -1612,12 +1650,25 @@ class ProberService:
                 item = target_results.get(target.target_id)
                 if not target.enabled:
                     rendered_targets.append(
-                        {"target_id": target.target_id, "state": "disabled"}
+                        {
+                            "target_id": target.target_id,
+                            "kind": (
+                                "throughput"
+                                if target.throughput is not None
+                                else "reachability"
+                            ),
+                            "state": "disabled",
+                        }
                     )
                 elif item is None:
                     rendered_targets.append(
                         {
                             "target_id": target.target_id,
+                            "kind": (
+                                "throughput"
+                                if target.throughput is not None
+                                else "reachability"
+                            ),
                             "state": (
                                 "error"
                                 if result.state is ReachabilityState.ERROR
@@ -1633,12 +1684,24 @@ class ProberService:
                     rendered_targets.append(
                         {
                             "target_id": item.target_id,
+                            "kind": (
+                                "throughput"
+                                if target.throughput is not None
+                                else "reachability"
+                            ),
                             "state": item.state.value,
                             "reason": item.reason.value if item.reason else None,
                             "http_status": item.http_status,
                             "duration_seconds": item.duration_seconds,
                             "ttfb_seconds": item.ttfb_seconds,
                             "bytes_read": item.bytes_read,
+                            "transfer_seconds": item.transfer_seconds,
+                            "throughput_mbps": item.throughput_mbps,
+                            "measurement_timestamp": (
+                                item.measurement_timestamp.timestamp()
+                                if item.measurement_timestamp is not None
+                                else None
+                            ),
                             "error": item.error,
                         }
                     )
@@ -1755,6 +1818,16 @@ class ProberService:
                     "target_id": item.target_id,
                     "state": item.state.value,
                     "reason": item.reason.value if item.reason else None,
+                    "duration_seconds": item.duration_seconds,
+                    "ttfb_seconds": item.ttfb_seconds,
+                    "bytes_read": item.bytes_read,
+                    "transfer_seconds": item.transfer_seconds,
+                    "throughput_mbps": item.throughput_mbps,
+                    "measurement_timestamp": (
+                        item.measurement_timestamp.isoformat()
+                        if item.measurement_timestamp is not None
+                        else None
+                    ),
                 }
                 for item in result.target_results
             ],

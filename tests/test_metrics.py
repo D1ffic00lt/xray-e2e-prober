@@ -42,3 +42,56 @@ def test_metrics_keep_unknown_distinct_from_failure_and_remove_deleted_checks() 
     second = metrics.render().decode()
     assert 'check_id="c1"' not in second
     assert _sample_values(second, "synthetic_prober_runtime_active") == [0.0]
+
+
+def test_metrics_export_throughput_separately_from_reachability_targets() -> None:
+    state = {
+        "instance_id": "instance-a",
+        "config_reload_success": True,
+        "checks": [
+            {
+                "check_id": "c1",
+                "source_id": "s1",
+                "entry_name": "NL Primary",
+                "mode": "connection",
+                "target_set_id": "ts1",
+                "state": "success",
+                "targets": [
+                    {
+                        "target_id": "health",
+                        "kind": "reachability",
+                        "state": "success",
+                        "duration_seconds": 0.2,
+                    },
+                    {
+                        "target_id": "download",
+                        "kind": "throughput",
+                        "state": "success",
+                        "bytes_read": 8_388_608,
+                        "transfer_seconds": 1.25,
+                        "throughput_mbps": 53.6870912,
+                        "measurement_timestamp": 1_800_000_000,
+                    },
+                ],
+            }
+        ],
+    }
+
+    rendered = Metrics(lambda: state).render().decode()
+
+    assert (
+        'synthetic_check_download_mbps{check_id="c1",instance_id="instance-a",'
+        'target_id="download"} 53.6870912'
+    ) in rendered
+    assert _sample_values(rendered, "synthetic_check_download_bytes") == [8_388_608]
+    assert _sample_values(rendered, "synthetic_check_download_transfer_seconds") == [1.25]
+    assert _sample_values(
+        rendered, "synthetic_check_download_last_run_timestamp_seconds"
+    ) == [1_800_000_000]
+    target_state_lines = [
+        line
+        for line in rendered.splitlines()
+        if line.startswith("synthetic_check_target_state{")
+    ]
+    assert all('target_id="download"' not in line for line in target_state_lines)
+    assert any('target_id="health"' in line for line in target_state_lines)

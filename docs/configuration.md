@@ -130,8 +130,57 @@ target_sets:
 `follow_redirects` задайте `max_redirects` (если оставить 0, валидатор schema v1
 применит 5). Все переходы обязаны идти через тот же Xray runtime.
 
-Все цели цикла выполняются даже после достижения quorum. Итог набора строится
-только из одного завершённого цикла одного поколения. Публичные домены в примере
+### Ограниченное измерение download throughput
+
+Target с блоком `throughput` потоково читает тело через тот же Xray runtime, не
+сохраняя его в памяти и не передавая содержимое в API/Prometheus:
+
+```yaml
+      - target_id: controlled-download
+        name: Controlled 8 MiB object
+        url: https://download.example/object-8m.bin
+        method: GET
+        expected_statuses: [200]
+        timeout: 30
+        throughput:
+          expected_bytes: 8388608
+          interval: 1800
+        follow_redirects: false
+        enabled: true
+```
+
+`expected_bytes` одновременно задаёт ожидаемый точный размер и жёсткий предел
+скачивания (от 64 KiB до 64 MiB). Ответ с другим `Content-Length`, фактически
+меньшим/большим телом или с compression отклоняется. `interval` допускает
+60–86400 секунд и по умолчанию равен 1800; между измерениями последний результат
+переносится в свежие циклы вместе со временем фактического замера. Body matcher
+для такого target запрещён.
+
+Первый плановый замер каждого check детерминированно распределяется по его
+interval, чтобы добавление target не создало одновременную нагрузку от всего
+inventory. Ручной `prober check run --once` выполняет throughput немедленно,
+игнорируя кэш и начальную задержку.
+
+Throughput-target является диагностическим: он не входит в `quorum` и не
+публикуется как `synthetic_check_target_state`, поэтому его сбой не меняет
+reachability check и не включает существующие target alerts. Отдельные метрики:
+
+- `synthetic_check_download_mbps`;
+- `synthetic_check_download_bytes`;
+- `synthetic_check_download_transfer_seconds`;
+- `synthetic_check_download_last_run_timestamp_seconds`;
+- `synthetic_check_download_state` и `synthetic_check_download_success`.
+
+Используйте фиксированный несжимаемый объект на контролируемом HTTPS-origin,
+который не расположен на проверяемой VPN-ноде. По умолчанию prober выполняет не
+более одного throughput download одновременно; предел задаёт
+`scheduler.max_parallel_throughput_requests`. Держите timeout throughput-target
+ниже обычного `scheduler.interval`, чтобы медленный origin не задерживал
+следующий reachability-цикл того же check.
+
+Все обычные цели цикла выполняются даже после достижения quorum; throughput
+target выполняется только по своему interval. Итог набора строится только из
+одного завершённого цикла одного поколения. Публичные домены в примере
 редактируемы и не считаются автоматически независимыми сетями; для надёжного
 мониторинга выберите цели с известными владельцами и failure domains.
 
@@ -217,6 +266,7 @@ scheduler:
   observatory_warmup_timeout: 30
   max_active_runtimes: 8
   max_parallel_requests: 32
+  max_parallel_throughput_requests: 1
   max_queue_size: 1024
   max_result_age: 180
 api:
@@ -228,6 +278,9 @@ api:
 молча вытесняться. Переполнение `max_queue_size` относится к scheduler error, а
 не к network failure. `max_result_age` определяет переход результата в `stale`;
 согласуйте его с freshness window в Prometheus rules.
+`max_parallel_throughput_requests` независимо ограничивает тяжёлые download
+измерения значением 1–8 и по умолчанию сериализует их (`1`); обычные HTTP targets
+по-прежнему используют `max_parallel_requests`.
 
 После ошибки старта или неожиданного завершения persistent runtime повторный
 старт ограничивает exponential backoff: от
