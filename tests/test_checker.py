@@ -319,6 +319,8 @@ async def test_throughput_upload_streams_exact_body_and_is_excluded_from_quorum(
     async def handler(request: httpx.Request) -> httpx.Response:
         body = await request.aread()
         requests.append((request.method, len(body), request.headers.get("content-length")))
+        if request.url.host == "upload.test":
+            await asyncio.sleep(0.01)
         return httpx.Response(
             204 if request.url.host == "health.test" else 200,
             request=request,
@@ -361,7 +363,7 @@ async def test_throughput_upload_streams_exact_body_and_is_excluded_from_quorum(
     assert upload.bytes_written == upload_bytes
     assert upload.bytes_read == 0
     assert upload.transfer_seconds is not None
-    assert upload.transfer_seconds > 0
+    assert upload.transfer_seconds >= 0.01
     assert upload.throughput_mbps is not None
     assert upload.throughput_mbps > 0
     assert upload.measurement_timestamp is not None

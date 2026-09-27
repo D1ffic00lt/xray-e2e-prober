@@ -80,7 +80,6 @@ class _BoundedUploadStream(httpx.AsyncByteStream):
         self.clock = clock
         self.bytes_written = 0
         self.started_at: float | None = None
-        self.completed_at: float | None = None
 
     async def __aiter__(self):
         self.started_at = self.clock()
@@ -91,13 +90,6 @@ class _BoundedUploadStream(httpx.AsyncByteStream):
             yield current
             self.bytes_written += len(current)
             remaining -= len(current)
-        self.completed_at = self.clock()
-
-    @property
-    def elapsed(self) -> float | None:
-        if self.started_at is None or self.completed_at is None:
-            return None
-        return max(self.completed_at - self.started_at, 1e-9)
 
 
 @dataclass(slots=True)
@@ -714,7 +706,17 @@ class Checker:
                 ) as response:
                     if upload_stream is not None:
                         bytes_written = upload_stream.bytes_written
-                        transfer_seconds = upload_stream.elapsed
+                        # HTTPX/httpcore may drain our iterator into the local
+                        # Xray socket faster than Xray can deliver the body to
+                        # the remote origin. The response headers arrive only
+                        # after the upload endpoint has accepted the request,
+                        # so include that end-to-end interval instead of
+                        # publishing local socket enqueue speed.
+                        if upload_stream.started_at is not None:
+                            transfer_seconds = max(
+                                loop.time() - upload_stream.started_at,
+                                1e-9,
+                            )
                     status = response.status_code
                     location = response.headers.get("location")
                     if (
